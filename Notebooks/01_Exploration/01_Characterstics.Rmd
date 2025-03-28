@@ -1,0 +1,481 @@
+---
+title: "01_Characterstics"
+knit: (function(input, encoding) {
+  rmarkdown::render(input = input,
+                    output_dir = here::here("Output", "HTML"),
+                    knit_root_dir = rprojroot::find_rstudio_root_file())})
+output:
+  html_document: 
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document: 
+    toc: yes
+date: "2025-03-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+```
+
+
+## Load
+
+Loading Pre-processed data provided
+
+```{r}
+## load
+load(here::here("Data", "ProcessedData", "processed_AnalysisData.Rdata"))
+```
+
+```{r}
+processed_data
+```
+
+```{r}
+## variable names in data
+names(processed_data)
+```
+
+## Basic Exploration
+
+### Basic Characterstics
+
+Number of total fish species.
+
+```{r}
+unique(processed_data$species)
+```
+
+Number of fish sample in each fish species.
+
+```{r}
+
+## "1" been considered as Male
+## "2" been considered as Female
+(
+  processed_data
+  |> group_by(species)
+  |> summarize(n = n_distinct(fishNum),
+               M = n_distinct(fishNum[sex == "1"]),
+               F = n_distinct(fishNum[sex == "2"]))
+)
+```
+
+Create a basic characteristics table
+
+```{r}
+character_data <- (
+  processed_data
+  |> select(1:58)
+  |> group_by(species, fishNum)
+  |> slice(1)
+  |> ungroup()
+)
+character_data
+```
+
+Separate into three dataset for each species
+
+```{r}
+LakeTrout <- processed_data[processed_data$species == "lakeTrout", ]
+LakeWhiteFish <- processed_data[processed_data$species == "lakeWhitefish", ]
+SmallmouthBass <- processed_data[processed_data$species == "smallmouthBass", ]
+```
+
+
+### Weight
+
+Individual fish weight in each species.
+
+```{r}
+## LakeTrout, LakeWhiteFish, SmallmouthBass
+weight_data = LakeTrout
+(
+  ggplot(weight_data, aes(x = fishNum, y = weight))
+  + geom_point(aes(color = sex), size = 3, alpha = 0.7)
+  + geom_line(aes(group = fishNum), alpha = 0.3)
+  + scale_color_manual(values = c("1" = "blue", "2" = "red"), 
+                        labels = c("1" = "Male", "2" = "Female"),
+                        name = "Sex")
+  + labs(
+      title = paste0("Indiviaul Weight distribution in ", weight_data$species),
+      x = "Fish ID",
+      y = "Weight"
+    )
+  + theme_minimal()
+  + theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "top"
+    )
+)
+```
+
+
+Weight distribution comparion between three species.
+
+```{r}
+(
+  ggplot(character_data, aes(x = species, y = weight, fill = species))
+  + geom_violin(alpha = 0.7, trim = FALSE)
+  + geom_boxplot(width = 0.1, fill = "white", alpha = 0.7)
+  + geom_jitter(aes(color = factor(sex)), width = 0.1, alpha = 0.6, size = 2)
+  + scale_color_manual(values = c("1" = "blue", "2" = "red"), 
+                       labels = c("1" = "Male", "2" = "Female"),
+                       name = "Sex")
+  + scale_fill_brewer(palette = "Set2")
+  + scale_x_discrete(labels = c("lakeTrout" = "Lake Trout", 
+                                "lakeWhitefish" = "Lake White Fish",
+                                "smallmouthBass" = "Smallmouth Bass"))
+  + labs(
+      title = "Weight Distribution by Fish Species",
+      x = "Species",
+      y = "Weight",
+      fill = "Species"
+    )
+  + theme_minimal()
+  + theme(
+      legend.position = "right",
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+)
+```
+
+
+### Total Length
+
+Individual fish total length in each species.
+
+```{r}
+## LakeTrout, LakeWhiteFish, SmallmouthBass
+length_data = SmallmouthBass
+(
+  ggplot(length_data, aes(x = fishNum, y = totalLength))
+  + geom_point(aes(color = sex), size = 3, alpha = 0.7)
+  + geom_line(aes(group = fishNum), alpha = 0.3)
+  + scale_color_manual(values = c("1" = "blue", "2" = "red"), 
+                        labels = c("1" = "Male", "2" = "Female"),
+                        name = "Sex")
+  + labs(
+      title = paste0("Individual Total Length distribution in ", length_data$species),
+      x = "Fish ID",
+      y = "Total Length"
+    )
+  + theme_minimal()
+  + theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "top"
+    )
+)
+```
+
+
+Total Length distribution comparison between three species.
+
+```{r}
+
+(
+  ggplot(character_data, aes(x = species, y = totalLength, fill = species))
+  + geom_violin(alpha = 0.7, trim = FALSE)
+  + geom_boxplot(width = 0.1, fill = "white", alpha = 0.7)
+  + geom_jitter(aes(color = factor(sex)), width = 0.1, alpha = 0.6, size = 2)
+  + scale_color_manual(values = c("1" = "blue", "2" = "red"), 
+                       labels = c("1" = "Male", "2" = "Female"),
+                       name = "Sex")
+  + scale_fill_brewer(palette = "Set2")
+  + scale_x_discrete(labels = c("lakeTrout" = "Lake Trout", 
+                                "lakeWhitefish" = "Lake White Fish",
+                                "smallmouthBass" = "Smallmouth Bass"))
+  + labs(
+      title = "Total Length Distribution by Fish Species",
+      x = "Species",
+      y = "Total Length",
+      fill = "Species"
+    )
+  + theme_minimal()
+  + theme(
+      legend.position = "right",
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+)
+```
+
+
+### Fork Length
+
+Individual fish fork length in each species.
+
+```{r}
+## LakeTrout, LakeWhiteFish, SmallmouthBass
+length_data = SmallmouthBass
+(
+  ggplot(length_data, aes(x = fishNum, y = forkLength))
+  + geom_point(aes(color = sex), size = 3, alpha = 0.7)
+  + geom_line(aes(group = fishNum), alpha = 0.3)
+  + scale_color_manual(values = c("1" = "blue", "2" = "red"), 
+                        labels = c("1" = "Male", "2" = "Female"),
+                        name = "Sex")
+  + labs(
+      title = paste0("Individual Fork Length distribution in ", length_data$species),
+      x = "Fish ID",
+      y = "Fork Length"
+    )
+  + theme_minimal()
+  + theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "top"
+    )
+)
+```
+
+
+Total Length distribution comparison between three species.
+
+```{r}
+(
+  ggplot(character_data, aes(x = species, y = forkLength, fill = species))
+  + geom_violin(alpha = 0.7, trim = FALSE)
+  + geom_boxplot(width = 0.1, fill = "white", alpha = 0.7)
+  + geom_jitter(aes(color = factor(sex)), width = 0.1, alpha = 0.6, size = 2)
+  + scale_color_manual(values = c("1" = "blue", "2" = "red"), 
+                       labels = c("1" = "Male", "2" = "Female"),
+                       name = "Sex")
+  + scale_fill_brewer(palette = "Set2")
+  + scale_x_discrete(labels = c("lakeTrout" = "Lake Trout", 
+                                "lakeWhitefish" = "Lake White Fish",
+                                "smallmouthBass" = "Smallmouth Bass"))
+  + labs(
+      title = "Fork Length Distribution by Fish Species",
+      x = "Species",
+      y = "Fork Length",
+      fill = "Species"
+    )
+  + theme_minimal()
+  + theme(
+      legend.position = "right",
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+)
+```
+
+
+### Shape difference of the caudal fin
+
+We want to use total_length - fork_length to compute the outermost portion of the caudal fin beyond its fork. We want to see if there’s an obvious difference in the shape and the size of the caudal fin.
+
+```{r}
+character_data$caudal_fin_diff <- character_data$totalLength - character_data$forkLength
+(
+  ggplot(character_data, aes(x = species, y = caudal_fin_diff, fill = species))
+  + geom_violin(alpha = 0.7, trim = FALSE)
+  + geom_boxplot(width = 0.1, fill = "white", alpha = 0.7)
+  + geom_jitter(aes(color = factor(sex)), width = 0.1, alpha = 0.6, size = 2)
+  + scale_color_manual(values = c("1" = "blue", "2" = "red"), 
+                       labels = c("1" = "Male", "2" = "Female"),
+                       name = "Sex")
+  + scale_fill_brewer(palette = "Set2")
+  + scale_x_discrete(labels = c("lakeTrout" = "Lake Trout", 
+                                "lakeWhitefish" = "Lake White Fish",
+                                "smallmouthBass" = "Smallmouth Bass"))
+  + labs(
+      title = "Fork Length Distribution by Fish Species",
+      x = "Species",
+      y = "Fork Length",
+      fill = "Species"
+    )
+  + theme_minimal()
+  + theme(
+      legend.position = "right",
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+)
+```
+
+
+### Weight-Length Curves
+
+```{r}
+total_length_lm <- lm(log(weight) ~ log(totalLength), data = character_data)
+summary(total_length_lm)
+```
+
+
+```{r}
+total_length_a <- exp(coef(total_length_lm)[1])
+total_length_b <- coef(total_length_lm)[2]
+ggplot(character_data, aes(x = totalLength, y = weight, color = species)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", formula = y ~ total_length_a * I(x^total_length_b), se = FALSE) +
+  labs(title = "Weight-Length Relationship",
+       x = "Length (units)",
+       y = "Weight (units)") +
+  facet_wrap(~ species, scales = "free")
+```
+
+```{r}
+## linear regression models for weight-length parameters
+wl_models <- by(character_data, character_data$species,
+                function(data) {
+                  model <- lm(log(weight) ~ log(totalLength), data = data)
+                  a <- exp(coef(model)[1])
+                  b <- coef(model)[2]
+                  return(list(a = a, b = b))
+                })
+
+## parameters for each species
+species_list <- levels(factor(character_data$species))
+total_length_a <- sapply(species_list, 
+                         function(sp){
+  wl_models[[sp]]$a
+})
+total_length_b <- sapply(species_list, 
+                         function(sp){
+  wl_models[[sp]]$b
+})
+names(total_length_a) <- species_list
+names(total_length_b) <- species_list
+
+## predict standard w-l curves
+predict_res <- data.frame()
+## for loop to compute
+for (sp in species_list) {
+  ## find length range for each species
+  length_range <- seq(
+    min(character_data$totalLength[character_data$species == sp]),
+    max(character_data$totalLength[character_data$species == sp]),
+    length.out = 100
+  )
+  
+  ## create standard weight for each species
+  temp <- data.frame(
+    totalLength = length_range,
+    weight = total_length_a[sp] * length_range^total_length_b[sp],
+    species = sp
+  )
+  
+  predict_res <- rbind(predict_res, temp)
+}
+
+## plot
+(
+  ggplot(character_data, aes(x = totalLength, y = weight, color = species))
+  + geom_point(alpha = 0.7)
+  + geom_line(data = predict_res, aes(x = totalLength, y = weight, color = species), linewidth = 1)
+  + labs(title = "Weight-Length Relationship",
+         x = "Length (mm)",
+         y = "Weight (g)")
+  + facet_wrap(~ species, scales = "free")
+)
+```
+
+### Dorso Lateral Height
+
+Individual fish dorso lateral height in each species.
+
+```{r}
+## LakeTrout, LakeWhiteFish, SmallmouthBass
+length_data = LakeWhiteFish
+(
+  ggplot(length_data, aes(x = fishNum, y = dorsoLatHeight))
+  + geom_point(aes(color = sex), size = 3, alpha = 0.7)
+  + geom_line(aes(group = fishNum), alpha = 0.3)
+  + scale_color_manual(values = c("1" = "blue", "2" = "red"), 
+                        labels = c("1" = "Male", "2" = "Female"),
+                        name = "Sex")
+  + labs(
+      title = paste0("Indiviaul Dorso Lateral Height distribution in ", length_data$species),
+      x = "Fish ID",
+      y = "Dorso Lateral Height"
+    )
+  + theme_minimal()
+  + theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "top"
+    )
+)
+```
+
+
+Dorso lateral height distribution comparison between three species.
+
+```{r}
+(
+  ggplot(character_data, aes(x = species, y = dorsoLatHeight, fill = species))
+  + geom_violin(alpha = 0.7, trim = FALSE)
+  + geom_boxplot(width = 0.1, fill = "white", alpha = 0.7)
+  + geom_jitter(aes(color = factor(sex)), width = 0.1, alpha = 0.6, size = 2)
+  + scale_color_manual(values = c("1" = "blue", "2" = "red"), 
+                       labels = c("1" = "Male", "2" = "Female"),
+                       name = "Sex")
+  + scale_fill_brewer(palette = "Set2")
+  + scale_x_discrete(labels = c("lakeTrout" = "Lake Trout", 
+                                "lakeWhitefish" = "Lake White Fish",
+                                "smallmouthBass" = "Smallmouth Bass"))
+  + labs(
+      title = "Dorso Lateral Height Distribution by Fish Species",
+      x = "Species",
+      y = "Dorso Lateral Height",
+      fill = "Species"
+    )
+  + theme_minimal()
+  + theme(
+      legend.position = "right",
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
