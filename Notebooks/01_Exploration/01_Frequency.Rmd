@@ -1,0 +1,766 @@
+---
+title: "02_Frequencies"
+knit: (function(input, encoding) {
+  # rmarkdown::render(input = input,
+  #                   output_format = "html_document",
+  #                   output_dir = here::here("Output", "HTML"),
+  #                   knit_root_dir = rprojroot::find_rstudio_root_file())})
+  rmarkdown::render(input = input,
+                    output_format = "pdf_document",
+                    output_dir = here::here("Output", "PDF"),
+                    knit_root_dir = rprojroot::find_rstudio_root_file())})
+output:
+  html_document: 
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document: 
+    toc: yes
+date: "2025-03-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r warning=FALSE, message=FALSE}
+library(CCA)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(ggridges)
+library(gridExtra)
+library(patchwork)
+library(FactoMineR)
+```
+
+
+## Load
+
+Loading Pre-processed data provided
+
+```{r}
+## load
+load(here::here("Data", "ProcessedData", "processed_AnalysisData.Rdata"))
+```
+
+```{r}
+processed_data
+```
+
+```{r}
+## variable names in data
+names(processed_data)
+```
+
+
+Create a dataframe only containing frequencies.
+```{r}
+frequency_data <- (
+  processed_data
+  |> select(1, 5, 59:481)
+)
+frequency_data |> head()
+```
+
+
+
+## Basic Frequencies
+
+### Data cleaning
+
+Since we notice the data of F90 to F170 are missing, we want to remove these frequencies columns from our dataset.
+```{r}
+## removing columns 93(F90) to 253(F170)
+frequency_data <- frequency_data |> select(-c(93:253))
+## name(frequency_data)
+```
+
+Separate into three dataset for each species
+
+```{r}
+LakeTrout <- frequency_data[frequency_data$species == "lakeTrout", ]
+LakeWhiteFish <- frequency_data[frequency_data$species == "lakeWhitefish", ]
+SmallmouthBass <- frequency_data[frequency_data$species == "smallmouthBass", ]
+```
+
+
+### TS Mean Between Fish Species
+
+We want to use the mean of target strength across all ping times of each fish across all frequencies to explore the dataset by fish species. We first create a dataframe that contains all mean values as above.
+
+```{r}
+ts_mean_allTime_data <- (
+  frequency_data
+  |> group_by(fishNum, species)
+  |> mutate(species = recode(species,
+                             "lakeTrout" = "Lake Trout",
+                             "lakeWhitefish" = "Lake Whitefish",
+                             "smallmouthBass" = "Smallmouth Bass"))
+  |> summarize(across(starts_with("F"), ~mean(., na.rm = TRUE), .names = "{.col}_mean"))
+)
+ts_mean_allTime_data |> head()
+```
+
+We then melt the wide format dataframe into a long format dataframe for easy visualization.
+
+```{r}
+ts_mean_allTime_data_long <- (
+  ts_mean_allTime_data
+  |> melt(
+    id.vars = c("fishNum", "species"),
+    variable.name = "Frequency",
+    value.name = "TS_mean_allTime"
+  )
+)
+
+ts_mean_allTime_data_long$Frequency <- as.numeric(gsub("F([0-9.]+)_mean", "\\1", 
+                                                       ts_mean_allTime_data_long$Frequency))
+ts_mean_allTime_data_long <- ts_mean_allTime_data_long |> arrange(fishNum, Frequency)
+ts_mean_allTime_data_long |> head()
+```
+
+
+#### Plots
+
+We want to show different type of plots to discover the frequency patterns of each fish species.
+
+First we want to plot an frequency response plot showing the mean target strength across different frequencies for different fish species with each fish response in the background.
+
+```{r}
+(
+  ggplot(ts_mean_allTime_data_long, aes(x = Frequency, y = TS_mean_allTime, color = species))
+  ## Indiviual fish (dotted lines)
+  + geom_line(
+    aes(group = interaction(fishNum, species)), 
+    linetype = "dotted", 
+    alpha = 0.3, 
+    linewidth = 0.5
+  )
+  ## Mean trends (bold lines)
+  + stat_summary(
+    fun = mean, 
+    geom = "line", 
+    aes(group = species), 
+    linewidth = 1.2
+  )
+  ## Aesthetics
+  + scale_x_continuous(breaks = seq(40, 260, by = 20)) 
+  + labs(
+    x = "Frequency (Hz)", 
+    y = "Mean Target Strength (dB)", 
+    color = "Fish Type"
+  )
+  + theme(legend.position = "top")
+)
+```
+
+
+Plot to observe the range of frequncies for each individual fish for each species.
+
+```{r}
+(
+  ggplot(ts_mean_allTime_data_long, aes(x = Frequency, y = TS_mean_allTime, color = species))
+  + stat_summary(fun.data = mean_cl_normal, geom = "ribbon", alpha = 0.2, aes(fill = species))
+  + stat_summary(fun = mean, geom = "line", linewidth = 1.2)
+)
+```
+
+
+Plot to observe the range of frequencies of each species separtely.
+
+```{r}
+(
+  ggplot(ts_mean_allTime_data_long, aes(x = Frequency, y = TS_mean_allTime))
+  + geom_line(aes(group = fishNum), linetype = "dotted", alpha = 0.3)
+  + stat_summary(fun = mean, geom = "line", color = "red", linewidth = 1.2)
+  + facet_wrap(~species)
+)
+```
+
+
+Density contour plot to show target strength measurements across differnt frequency ranges for each fish species.
+
+```{r}
+## function to create density contour plot
+create_frequency_density_plot <- function(data, title){
+#' Create Target Strength Frequency Response Plots
+#'
+#' This function creates visualization of acoustic target strength data across frequency ranges for fish.
+#' The plot combines multiple visualization elements:
+#'   - Hexagonal binning to show data density distribution
+#'   - Individual fish measurements as dotted gray lines
+#'   - Mean target strength trend line in red
+#'   
+#' @param data A long format data frame containing columns in this order: fishNum, species, Frequency, and TS_mean
+#' @param title String for the plot title
+
+  colnames(data)[4] <- "TS_mean"
+
+  (
+    ggplot(data, aes(x = Frequency, y = TS_mean))
+    ## hexbin density layer
+    + geom_hex(aes(fill = after_stat(count)), bins = 20, alpha = 0.7)
+    ## Indiviiual fish lines
+    + geom_line(
+      aes(group = interaction(fishNum, species)), 
+      linetype = "dotted", 
+      alpha = 0.2, 
+      color = "gray20"
+    )
+    ## mean trend
+    + stat_summary(
+      fun = mean, 
+      geom = "line", 
+      color = "red", 
+      linewidth = 1.2
+    )
+    ## facet by fish type
+    + facet_wrap(~species, nrow = 1)
+    ## Aesthetics
+    + scale_fill_viridis_c(name = "Data Density")
+    + scale_x_continuous(breaks = seq(0, 260, by = 20))
+    + labs(title = title, x = "Frequency (Hz)", y = "TS_mean (dB)")
+    # + theme_minimal()
+    + theme(legend.position = "bottom")
+  )
+}
+```
+
+```{r}
+## split data into two frequency groups
+ts_mean_allTime_low_long <- ts_mean_allTime_data_long |> filter(Frequency >= 45 & Frequency <= 89.5)
+ts_mean_allTime_high_long <- ts_mean_allTime_data_long |> filter(Frequency >= 173 & Frequency <= 260)
+
+# Create plots for both frequency ranges
+plot_frequency_density_low <- create_frequency_density_plot(ts_mean_allTime_low_long, "Frequency Range: 45–89.5 Hz")
+plot_frequency_density_high <- create_frequency_density_plot(ts_mean_allTime_high_long, "Frequency Range: 173–260 Hz")
+
+# Arrange side-by-side
+grid.arrange(plot_frequency_density_low, plot_frequency_density_high, ncol = 2)
+```
+
+
+Create plot of density distribution of target strength by fish species.
+
+```{r}
+(
+  ggplot(ts_mean_allTime_data_long, aes(
+    x = TS_mean_allTime,       # Numeric variable for density
+    y = species,     # Categorical variable (fish species)
+    fill = species   # Color by species
+  ))
+  ## density ridges
+  + geom_density_ridges(alpha = 0.6, scale = 1.5)
+  + labs(
+    title = "Density Distribution of TS_mean by Fish Species",
+    x = "Mean Target Strength (dB)",
+    y = "Fish Species"
+  )
+  + theme_minimal()
+  + scale_fill_manual(values = c("#1f77b4", "#ff7f0e", "#2ca02c"))
+)
+```
+
+We create another density contour plot and we want to observe if there any potential dominant frequency response region by each fish species.
+
+```{r warning=FALSE}
+(
+  ggplot(ts_mean_allTime_data_long, aes(x = Frequency, y = TS_mean_allTime, color = species))
+  ## density contours
+  + geom_density_2d(aes(fill = species), alpha = 0.2, contour_var = "density")
+  ## frequency response trend lines
+  + geom_smooth(
+    method = "loess",
+    formula = y ~ x,
+    se = FALSE,  # Remove confidence bands
+    linewidth = 1.2
+  )
+  ## Aesthetics
+  + labs(
+    title = "Dominant Regions and Frequency Response by Fish Species",
+    x = "Frequency (kHz)",
+    y = "Mean Target Strength (dB)",
+    color = "Fish Species"
+  )
+  + scale_color_manual(values = c("#1f77b4", "#ff7f0e", "#2ca02c"))
+  + scale_fill_manual(values = c("#1f77b4", "#ff7f0e", "#2ca02c"))
+  + theme(legend.position = "bottom")
+  + theme_minimal()
+)
+```
+
+
+### TS Mean In Fish Species
+
+This section we want to investigate the potential trend / pattern in the frequency response in an indiviual fish species.
+
+#### Lake Trout
+
+We first want to investigate the frequency response across different ping time for a single fish. We want to focus on `fishNum = LT001`.
+
+```{r}
+LT001_frequency <- LakeTrout[LakeTrout$fishNum == "LT004", ]
+# LT001_frequency <- LakeWhiteFish[LakeWhiteFish$fishNum == "LWF003", ]
+# LT001_frequency <- SmallmouthBass[SmallmouthBass$fishNum == "SMB005", ]
+```
+
+```{r}
+## melt dataframe into plottable format
+LT001_frequency$ping_id <- 1:nrow(LT001_frequency)
+LT001_frequency_long <- melt(
+  LT001_frequency,
+  id.vars = c("fishNum", "species", "ping_id"),
+  variable.name = "Frequency",
+  value.name = "TS"
+)
+LT001_frequency_long$Frequency <- as.numeric(gsub("F", "", 
+                                                  LT001_frequency_long$Frequency))
+LT001_frequency_long |> head()
+```
+
+Plot to create visualization of frequency response of fish `LT001` across ping time. 
+
+```{r}
+(
+  ggplot(LT001_frequency_long, aes(x = Frequency, y = TS))
+  ## Indiviual ping time response as dotted lines
+  + geom_line(aes(group = ping_id), linetype = "dotted", alpha = 0.3, color = "gray40")
+  ## mean respinse as solid line
+  + stat_summary(fun = mean, geom = "line", color = "red", linewidth = 1.2)
+  + stat_summary(fun = median, geom = "line", color = "blue", linewidth = 1.2)
+  ## confidence interval for mean
+  # + stat_summary(fun.data = mean_cl_normal, geom = "ribbon", alpha = 0.2, fill = "red")
+  + labs(
+    title = "Acoustic Frequency Response",
+    subtitle = "Individual ping responses with mean trend",
+    x = "Frequency (Hz)",
+    y = "Target Strength (dB)"
+  )
+  + theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  )
+  + theme_minimal()
+)
+```
+
+Next, we want to compte the difference between the frequency response from the mean from different ping time.
+
+```{r}
+## compute mean
+LT001_frequency_mean <- (
+  LT001_frequency_long
+  |> group_by(Frequency)
+  |> summarize(TS_mean = mean(TS, na.rm = TRUE))
+)
+
+## left join and compute difference
+LT001_frequency_long <- (
+  LT001_frequency_long
+  |> left_join(LT001_frequency_mean, by = "Frequency")
+  |> mutate(diff_from_mean = TS - TS_mean)
+)
+LT001_frequency_long |> head()
+```
+
+```{r}
+(
+  ggplot(LT001_frequency_long, aes(x = Frequency, y = diff_from_mean))
+  ## Indiviual ping time response as dotted lines
+  + geom_line(aes(group = ping_id), linetype = "dotted", alpha = 0.3, color = "gray40")
+  ## mean respinse as solid line
+  + stat_summary(fun = mean, geom = "line", color = "red", linewidth = 1.2)
+  + stat_summary(fun = median, geom = "line", color = "blue", linewidth = 1.2)
+  ## confidence interval for mean
+  # + stat_summary(fun.data = mean_cl_normal, geom = "ribbon", alpha = 0.2, fill = "red")
+  + labs(
+    title = "Acoustic Frequency Response",
+    subtitle = "Individual ping responses with mean trend",
+    x = "Frequency (Hz)",
+    y = "Target Strength (dB)"
+  )
+  + theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  )
+  + theme_minimal()
+)
+```
+
+```{r}
+# Calculate confidence intervals for the differences from mean
+ci_data <- LT001_frequency_long %>%
+  group_by(Frequency) %>%
+  summarize(
+    mean_diff = mean(diff_from_mean, na.rm = TRUE),
+    sd_diff = sd(diff_from_mean, na.rm = TRUE),
+    n = n(),
+    # Calculate 95% confidence interval
+    ci_lower = mean_diff - qt(0.975, n-1) * sd_diff / sqrt(n),
+    ci_upper = mean_diff + qt(0.975, n-1) * sd_diff / sqrt(n),
+    # Calculate variability metrics
+    cv = sd_diff / abs(mean_diff + 0.0001), # Coefficient of variation (adding small constant to avoid div by 0)
+    range = max(diff_from_mean, na.rm = TRUE) - min(diff_from_mean, na.rm = TRUE)
+  )
+
+# Create a visualization of the confidence intervals
+ggplot(ci_data, aes(x = Frequency)) +
+  # Add confidence interval as ribbon
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.3, fill = "blue") +
+  # Add mean line
+  geom_line(aes(y = mean_diff), color = "blue", linewidth = 1) +
+  # Add zero reference line
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  # Add variability plot
+  # geom_line(aes(y = cv), color = "green", linewidth = 1) +
+  # Create second y-axis for coefficient of variation
+  scale_y_continuous(
+    name = "Difference from Mean (dB)",
+    sec.axis = sec_axis(~ ., name = "Coefficient of Variation")
+  ) +
+  labs(
+    title = paste("Variation in Acoustic Response for", unique(LT001_frequency_long$fishNum)),
+    subtitle = "Blue: 95% CI of differences from mean, Green: Coefficient of Variation",
+    x = "Frequency (Hz)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title.y.right = element_text(color = "green"),
+    axis.text.y.right = element_text(color = "green")
+  )
+```
+
+
+#### Principal Component Analysis
+
+We want to perform PCA in Lake Trout and we want to see if specified frequencies is contributing strongly to the variance of Lake Trout.
+
+```{r}
+## aggregating dataframe into mean frquencies by each fish and scale
+LakeTrout_agg <- (
+  LakeTrout
+  |> group_by(fishNum)
+  |> filter(fishNum != "LT008") ## contains missing bal
+  |> summarise(across(starts_with("F"), mean, na.rm = TRUE))
+  |> ungroup()
+  |> dplyr::select(-fishNum)
+  |> scale()
+)
+
+LakeTrout_pca <- PCA(LakeTrout_agg, graph = FALSE)
+LakeTrout_pca$eig 
+```
+
+```{r}
+LakeTrout_loadings_pc1 <-(
+  LakeTrout_pca$var$coord[, 1]
+  |> as.data.frame()
+  |> rename(Loading = "LakeTrout_pca$var$coord[, 1]")
+  |> mutate(Frequency = rownames(LakeTrout_pca$var$coord))
+  |> arrange(desc(abs(Loading)))
+)
+# loadings_pc1
+LakeTrout_loadings_pc1_top_frequencies <- LakeTrout_loadings_pc1 |> head(20)
+print(LakeTrout_loadings_pc1_top_frequencies)
+```
+
+```{r}
+ggplot(LakeTrout_loadings_pc1_top_frequencies, aes(x = reorder(Frequency, -abs(Loading)), y = Loading)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Top Frequencies Driving Variability in LakeTrout",
+       x = "Frequency (kHz)", y = "PC1 Loading") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+cor_mat <- cor(LakeTrout_agg) |> as.data.frame()
+cor_mat |> head()
+```
+
+
+
+### Lake White Fish
+
+#### PCA
+
+```{r}
+is.na(LakeWhiteFish) |> sum()
+```
+
+
+```{r}
+## aggregating dataframe into mean frquencies by each fish and scale
+LakeWhiteFish_agg <- (
+  LakeWhiteFish
+  |> group_by(fishNum)
+  |> summarise(across(starts_with("F"), mean, na.rm = TRUE))
+  |> ungroup()
+  |> dplyr::select(-fishNum)
+  |> scale()
+)
+
+LakeWhiteFish_pca <- PCA(LakeWhiteFish_agg, graph = FALSE)
+LakeWhiteFish_pca$eig
+```
+
+```{r}
+LakeWhiteFish_loadings_pc1 <-(
+  LakeWhiteFish_pca$var$coord[, 1]
+  |> as.data.frame()
+  |> rename(Loading = "LakeWhiteFish_pca$var$coord[, 1]")
+  |> mutate(Frequency = rownames(LakeWhiteFish_pca$var$coord))
+  |> arrange(desc(abs(Loading)))
+)
+# loadings_pc1
+LakeWhiteFish_loadings_pc1_top_frequencies <- LakeWhiteFish_loadings_pc1 |> head(20)
+print(LakeWhiteFish_loadings_pc1_top_frequencies)
+```
+
+
+#### Smallmouth Bass
+
+```{r}
+is.na(SmallmouthBass) |> sum()
+```
+
+
+```{r}
+## aggregating dataframe into mean frquencies by each fish and scale
+SmallmouthBass_agg <- (
+  SmallmouthBass
+  |> group_by(fishNum)
+  |> summarise(across(starts_with("F"), mean, na.rm = TRUE))
+  |> ungroup()
+  |> dplyr::select(-fishNum)
+  |> scale()
+)
+
+SmallmouthBass_pca <- PCA(SmallmouthBass_agg, graph = FALSE)
+SmallmouthBass_pca$eig
+```
+
+```{r}
+SmallmouthBass_loadings_pc1 <-(
+  SmallmouthBass_pca$var$coord[, 1]
+  |> as.data.frame()
+  |> rename(Loading = "SmallmouthBass_pca$var$coord[, 1]")
+  |> mutate(Frequency = rownames(SmallmouthBass_pca$var$coord))
+  |> arrange(desc(abs(Loading)))
+)
+# loadings_pc1
+SmallmouthBass_loadings_pc1_top_frequencies <- SmallmouthBass_loadings_pc1 |> head(20)
+print(SmallmouthBass_loadings_pc1_top_frequencies)
+```
+
+```{r}
+(SmallmouthBass
+  |> group_by(fishNum)
+  |> summarise(across(starts_with("F"), mean, na.rm = TRUE))
+  |> ungroup()
+  |> dplyr::select(-fishNum)
+ |> summarise(across(starts_with("F"), mean, na.rm = TRUE))
+ )
+```
+
+### Overall PCA
+```{r}
+LT_mean_frequency <- (
+  LakeTrout
+  |> group_by(fishNum)
+  |> filter(fishNum != "LT008")
+  |> dplyr::select(matches("^F(1[7-9][0-9](\\.[0-9])?|2[0-5][0-9](\\.[0-9])?|260(\\.[0-9])?)$"))
+  |> summarise(across(starts_with("F"), mean, na.rm = TRUE))
+  |> ungroup()
+  |> dplyr::select(-fishNum)
+  |> summarise(across(starts_with("F"), mean, na.rm = TRUE))
+)
+LT_mean_frequency |> head()
+```
+```{r}
+LWF_mean_frequency <- (
+  LakeWhiteFish
+  |> group_by(fishNum)
+  |> dplyr::select(matches("^F(1[7-9][0-9](\\.[0-9])?|2[0-5][0-9](\\.[0-9])?|260(\\.[0-9])?)$"))
+  |> summarise(across(starts_with("F"), mean, na.rm = TRUE))
+  |> ungroup()
+  |> dplyr::select(-fishNum)
+  |> summarise(across(starts_with("F"), mean, na.rm = TRUE))
+)
+LWF_mean_frequency |> head()
+```
+```{r}
+SB_mean_frequency <- (
+  SmallmouthBass
+  |> group_by(fishNum)
+  |> dplyr::select(matches("^F(1[7-9][0-9](\\.[0-9])?|2[0-5][0-9](\\.[0-9])?|260(\\.[0-9])?)$"))
+  |> summarise(across(starts_with("F"), mean, na.rm = TRUE))
+  |> ungroup()
+  |> dplyr::select(-fishNum)
+  |> summarise(across(starts_with("F"), mean, na.rm = TRUE))
+)
+SB_mean_frequency |> head()
+```
+
+
+```{r}
+## prepare fish species PCA comparison data
+prepare_species_PCA_data <- function(species, mean_freq_df, loadings_df) {
+  
+  ## convery mean frequecy data to long format
+  species_long <- melt(
+    mean_freq_df,
+    variable.name = "Frequency",
+    value.name = "TS"
+    
+  )
+  ## removing "F" from frequency and make it numerical
+  species_long$Frequency <- as.numeric(gsub("F", "",
+                                            species_long$Frequency))
+  loadings_df$Frequency <- as.numeric(gsub("F", "",
+                                            loadings_df$Frequency))
+  
+  ## Add species name
+  species_long$Species <- species
+  
+  ## join with loadings
+  species_combined <- merge(
+    species_long,
+    loadings_df[, c("Frequency", "Loading")],
+    by = "Frequency",
+    all.x = TRUE
+  )
+  
+  return(species_combined)
+}
+```
+
+```{r}
+## prepare PCA data for each species
+LakeTrout_PCA_data <- prepare_species_PCA_data(
+  "Lake Trout",
+  LT_mean_frequency,
+  LakeTrout_loadings_pc1
+)
+
+LakeWhiteFish_PCA_data <- prepare_species_PCA_data(
+  "Lake Whitefish",
+  LWF_mean_frequency,
+  LakeWhiteFish_loadings_pc1
+)
+
+SmallmouthBass_PCA_data <- prepare_species_PCA_data(
+  "Smallmouth Bass",
+  SB_mean_frequency,
+  SmallmouthBass_loadings_pc1
+)
+
+all_species_PCA_data <- rbind(
+  LakeTrout_PCA_data,
+  LakeWhiteFish_PCA_data,
+  SmallmouthBass_PCA_data
+)
+```
+
+```{r}
+all_species_PCA_data |> head()
+```
+
+```{r}
+## create plots to show PCA laodings and TS_mean to visulize the PCA data
+species_colors <- c(
+  "Lake Trout" = "#1f77b4", 
+  "Lake Whitefish" = "#2ca02c", 
+  "Smallmouth Bass" = "#ff7f0e"
+)
+
+## PCA loading plots
+all_species_PCA_plot <- (
+  ggplot(all_species_PCA_data,
+         aes(x = Frequency, y = Loading, color = Species))
+  + geom_line(linewidth = 0.5)
+  + scale_color_manual(values = species_colors)
+  + labs(
+    title = "PC1 Loadings by species",
+    y = "PC1 Loading"
+  )
+  + theme(
+    axis.title.x = element_blank(), 
+    axis.text.x = element_blank(),  
+    legend.position = "none"         
+  )
+  + theme_minimal()
+)
+
+## TS_mean plots
+all_species_TS_mean_plot <- (
+  ggplot(all_species_PCA_data,
+         aes(x = Frequency, y = TS, color = Species))
+  + geom_line(linewidth = 0.8)
+  + scale_color_manual(values = species_colors)
+  + labs(
+    title = "Mean Target Strength by Species",
+    y = "Target Strength",
+    x = "Frequency"
+  )
+  + theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  
+    legend.position = "bottom"                        
+  )
+  + theme_minimal()
+)
+
+## combined plots
+all_species_PCA_combined_plot <- (
+  all_species_PCA_plot / all_species_TS_mean_plot
+  + plot_layout(heights = c(1, 1.2))
+)
+all_species_PCA_combined_plot
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
