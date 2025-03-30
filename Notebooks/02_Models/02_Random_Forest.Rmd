@@ -1,0 +1,214 @@
+---
+title: "02_Random_Forest"
+knit: (function(input, encoding) {
+  rmarkdown::render(input = input,
+                    output_format = "html_document",
+                    output_dir = here::here("Output", "HTML"),
+                    knit_root_dir = rprojroot::find_rstudio_root_file())})
+  # rmarkdown::render(input = input,
+  #                   output_format = "pdf_document",
+  #                   output_dir = here::here("Output", "PDF"),
+  #                   knit_root_dir = rprojroot::find_rstudio_root_file())})
+output:
+  html_document: 
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document: 
+    toc: yes
+date: "2025-03-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r warning=FALSE, message=FALSE}
+library(dplyr)
+library(caret)
+library(keras)
+library(purrr)
+library(ggplot2)
+library(recipes)
+library(reshape2)
+library(ggridges)
+library(gridExtra)
+library(patchwork)
+library(tidymodels)
+library(FactoMineR)
+```
+
+
+## Load
+
+Loading Pre-processed data computed
+
+```{r}
+load(here::here("Output", "Data", "02_Data_Process.RData"))
+```
+
+## Random Forest
+
+```{r}
+set.seed(2453)
+
+## Random Forest
+## define recipe
+rf_recipe <- (
+  recipe(species ~ ., data = train_raw_data)
+  |> update_role(fishNum, new_role = "ID")
+)
+
+## define random forest model
+rf_model <- (
+  rand_forest(
+    trees = tune(),
+    mtry = tune(),
+    min_n = tune()
+  )
+  |> set_engine("ranger", importance = "impurity")
+  |> set_mode("classification")
+)
+
+## workflow assemble
+rf_wf <- (
+  workflow()
+  |> add_recipe(rf_recipe)
+  |> add_model(rf_model)
+)
+
+## tune hyperparameters
+rf_folds <- vfold_cv(train_raw_data, v = 5)
+rf_grid <- grid_regular(
+  trees(range = c(100, 500)), # 300  600  900 1200 1500
+  mtry(range = c(10, 50)),    # 10  32  55  77 100
+  min_n(range = c(1, 20)),     # 1  5 10 15 20
+  levels = 5
+)
+
+## took 6 hours to tune
+# rf_tuned_model <- (
+#   rf_wf
+#   |> tune_grid(
+#     resamples = rf_folds,
+#     grid = rf_grid,
+#     metrics = metric_set(accuracy)
+#     )
+#   )
+# ## save to RDS
+# save(rf_tuned_model, file = here::here("Output", "Data", "02_RF_Tuned_Models.rds"))
+```
+
+
+```{r}
+## load tuned models
+load(here::here("Output", "Data", "02_RF_Tuned_Models.rds"))
+# Select the best hyperparameters
+rf_best_parameters <- rf_tuned_model |> tune::select_best(metric = "accuracy")
+rf_best_parameters
+
+## finalize the best model for prediction
+fit_rf_best <- (
+  rf_wf
+  |> finalize_workflow(rf_best_parameters)
+  |> fit(train_raw_data)
+)
+
+## predict on the test data
+predict_rf_best <- (
+  test_raw_data
+  |> bind_cols(
+    predict(fit_rf_best, new_data = test_raw_data),
+    predict(fit_rf_best, new_data = test_raw_data, type = "prob")
+    )
+  |> mutate(species = factor(species))
+)
+
+## performance metrics
+rf_metric <- metric_set(accuracy)
+performance_rf_best <- (
+  predict_rf_best
+  |> rf_metric(
+    truth = species,
+    estimate = .pred_class
+  )
+)
+
+
+## Model Performance
+
+## create tibble to store predictions for model performance comparison
+rf_predictions <- tibble(
+  fishNum = test_std_data$fishNum,
+  species = test_std_data$species,
+  pred_class = predict_rf_best$.pred_class
+)
+
+## count majority predictions on ping data for a single fish
+## to determine the dnn prediction for this fish
+rf_fish_level_pred <- (
+  rf_predictions
+  |> group_by(fishNum)
+  |> summarise(
+    pred_class = names(which.max(table(pred_class))),
+    species = first(species)
+  )
+  |> mutate(
+    pred_class = factor(pred_class, levels = all_species),
+    species = factor(species, levels = all_species)
+  )
+)
+rf_fish_level_pred
+
+## compute and show ping predictions counts
+rf_predictions_count <- (
+  rf_predictions
+  |> group_by(fishNum, species, pred_class)
+  |> summarise(n = n(), .groups = "drop")
+  |> pivot_wider(
+    names_from = pred_class,
+    values_from = n,
+    values_fill = 0,
+    names_prefix = "Pred_"
+  )
+)
+rf_predictions_count$Pred_class <- rf_fish_level_pred$pred_class 
+rf_predictions_count
+
+# Compute accuracy
+rf_accuracy <- (
+  rf_fish_level_pred
+  |> accuracy(truth = species, estimate = pred_class)
+)
+
+## confusion matrix
+rf_conf_mat <- (
+  rf_fish_level_pred
+  |> conf_mat(truth = species, estimate = pred_class)
+)
+
+## Output
+## confusion matrix
+cat("\nConfusion Matrix:\n")
+print(rf_conf_mat)
+
+cat("\nModel Performance Metrics:\n")
+print(rf_accuracy)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

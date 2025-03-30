@@ -1,0 +1,1423 @@
+---
+title: "02_Models"
+knit: (function(input, encoding) {
+  rmarkdown::render(input = input,
+                    output_format = "html_document",
+                    output_dir = here::here("Output", "HTML"),
+                    knit_root_dir = rprojroot::find_rstudio_root_file())})
+  # rmarkdown::render(input = input,
+  #                   output_format = "pdf_document",
+  #                   output_dir = here::here("Output", "PDF"),
+  #                   knit_root_dir = rprojroot::find_rstudio_root_file())})
+output:
+  html_document: 
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document: 
+    toc: yes
+date: "2025-03-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r warning=FALSE, message=FALSE}
+library(dplyr)
+library(caret)
+library(keras)
+library(purrr)
+library(ggplot2)
+library(recipes)
+library(reshape2)
+library(ggridges)
+library(gridExtra)
+library(patchwork)
+library(tidymodels)
+library(FactoMineR)
+```
+
+
+## Load
+
+Loading Pre-processed data provided
+
+```{r}
+## load
+load(here::here("Data", "ProcessedData", "processed_AnalysisData.Rdata"))
+```
+
+```{r}
+processed_data
+```
+
+```{r}
+## variable names in data
+names(processed_data)
+```
+
+
+## Data Preparation
+
+1. We only focuses on the target strength data from the fish species, thus, we first only create a dataframe that contains the frequency response across all pings for fish.
+
+```{r}
+frequency_data <- (
+  processed_data
+  |> dplyr::select(c(1, 5, 59:481))
+)
+frequency_data |> head()
+```
+
+
+2. We next remove the fish `LT008` because it is missing all high frequency data from `F173` to `F258.5` for all pings, where results in a total of 31476 `NA` value and fill in values is not meaningful at all.
+
+```{r}
+frequency_data <- (
+  frequency_data
+  |> filter(fishNum != "LT008")
+)
+unique(frequency_data$fishNum)
+```
+
+3. We then remove the data columns `F90` to `F170` because they did not record in the original data, where all columns are `NA` values for all ping data and all fish.
+
+```{r}
+frequency_data <- frequency_data |> dplyr::select(-c(93:253))
+```
+
+4. Prepare class levels and number of classes in the data for model development use
+
+```{r}
+all_species <- unique(frequency_data$species)
+num_classes <- length(all_species)
+```
+
+### Train and Test set by fishNum
+
+We then want to create a train and test set by fish ID. We want to randomly choose 70% Train set and 30% Test set.
+
+```{r}
+set.seed(2453)
+
+## unique fish id
+unique_fishNum <- frequency_data |> distinct(fishNum, species)
+
+## create stratified split
+train_indices <- createDataPartition(
+  unique_fishNum$species,
+  p = 0.8,
+  list = FALSE
+)
+
+## create train/test fish ID set
+train_fish <- unique_fishNum[train_indices, ]
+test_fish <- unique_fishNum[-train_indices, ]
+
+## split into train/test set
+train_data <- frequency_data |> filter(fishNum %in% train_fish$fishNum)
+test_data <- frequency_data |> filter(fishNum %in% test_fish$fishNum)
+dim(train_data)
+dim(test_data)
+```
+
+
+### Prepare Data for different models
+
+We want to create a classification system that using the following models:
+
+1. Logistics regression (with PCA)
+2. Random Forest (Raw data)
+3. Deep Neural Network (Raw data)
+4. LSTM (Raw Sequence data)
+5. LSTM with attention layer (Raw Sequence data)
+6. CNN (Raw Sequence data)
+
+We need to prepare three type od data.
+```{r}
+## standardized data
+preProc <- preProcess(train_data, method = c("center", "scale"))
+train_std_data <- predict(preProc, train_data)
+test_std_data <- predict(preProc, test_data)
+
+## raw data
+train_raw_data <- train_data
+test_raw_data <- test_data
+
+## create sequence data
+create_sequences_data <- function(data) {
+  
+  ## group by fish
+  grouped_data <- (
+    data
+    |> group_by(fishNum)
+    |> mutate(n_pings = n())
+    |> ungroup()
+    |> group_split(fishNum)
+  )
+  
+  # Extract metadata
+  labels <- map_chr(grouped_data, ~ unique(.x$species))
+  # labels <- unique(grouped_data$species)
+  fishNums <- map_chr(grouped_data, ~ unique(.x$fishNum))
+  # fishNums <- unique(grouped_data$fishNum)
+  
+  ## convert to list of matrices
+  sequences <- (
+    grouped_data
+    |> map(~ {
+      freq_cols <- (
+        .x
+        |> dplyr::select(-c(fishNum, species))
+        |> dplyr::select(where(is.numeric))
+      )
+      as.matrix(freq_cols)
+    })
+  )
+  
+  return(list(
+    fishNum = fishNums,
+    species = labels,
+    sequences = sequences
+  ))
+}
+train_seq_data <- create_sequences_data(train_std_data)
+test_seq_data <- create_sequences_data(test_std_data)
+```
+
+
+
+## Models
+
+### Logistics Regression
+
+```{r}
+###############################################################################
+# PCA-Logistic Regression Pipeline with 90% Variance Retention
+# ------------------------------------------------------------
+# This script:
+# 1. Applies PCA to standardized frequency data
+# 2. Retains components explaining ≥90% cumulative variance
+# 3. Trains logistic regression on reduced dimensions
+# 4. Evaluates performance on test set
+###############################################################################
+
+## fish level standard data
+train_std_fish_level_data <- (
+  train_std_data
+  |> group_by(fishNum, species)
+  |> summarise(across(starts_with("F"), mean))
+  |> ungroup()
+)
+
+test_std_fish_level_data <- (
+  test_std_data
+  |> group_by(fishNum, species)
+  |> summarise(across(starts_with("F"), mean))
+  |> ungroup()
+)
+
+## Apply PCA
+## define recipe
+pca_recipe <- (
+  recipe(species ~ ., data = train_std_fish_level_data)
+  ## keeping fishNum but exclude from analysis
+  |> update_role(fishNum, new_role = "ID")
+  ## want PCs at least have 90% variance explained
+  |> step_pca(
+    all_numeric_predictors(),
+    threshold = 0.9,
+    options = list(center = FALSE, scale. = FALSE)
+  )
+)
+
+## define model
+## using multinomial regression
+multinom_model <- (
+  multinom_reg()
+  |> set_engine("nnet")
+  |> set_mode("classification")
+)
+
+## assembly workflow
+pca_multinom_wf <- (
+  workflow()
+  |> add_recipe(pca_recipe)
+  |> add_model(multinom_model)
+)
+
+## train model
+fit_pca_multinom <- (
+  pca_multinom_wf
+  |> fit(data = train_std_fish_level_data)
+)
+
+## Variance Explanation Analysis
+## extract PCA details
+pca_multinom_res <- (
+  extract_preprocessor(fit_pca_multinom)
+  |> prep()
+)
+
+## extract variance explained metrics
+pca_multinom_model <- pca_multinom_res$steps[[1]]$res
+pca_multinom_variance <- pca_multinom_model$sdev^2
+pca_multinom_variance_cum_variance <- cumsum(pca_multinom_variance / sum(pca_multinom_variance))
+
+pca_multinom_variance_tbl <- (
+  tibble(
+    component = paste0("PC", seq_along(pca_multinom_variance_cum_variance)),
+    cumulative_variance = pca_multinom_variance_cum_variance
+  )
+  |> filter(
+    cumulative_variance <= 0.9 | row_number() == which.max(cumulative_variance >= 0.9)
+  )
+)
+
+# print
+cat("\nPCA Variance Explanation:\n")
+print(pca_multinom_variance_tbl)
+cat("Number of components retained:", nrow(pca_multinom_variance_tbl), "\n")
+```
+
+
+```{r}
+## Model Predictions
+## generate test results
+predict_pca_multinom <- (
+  test_std_fish_level_data
+  |> bind_cols(
+    predict(fit_pca_multinom, new_data = test_std_fish_level_data), ## compute class predictions
+    predict(fit_pca_multinom, new_data = test_std_fish_level_data, type = "prob") ## compute probabilities
+  )
+  |> mutate(species = factor(species))
+)
+
+## performance metrics
+model_metrics <- metric_set(accuracy, sensitivity, specificity)
+performance_pca_multinom <- (
+  predict_pca_multinom
+  |> model_metrics(
+    truth = species,
+    estimate = .pred_class
+  )
+)
+
+# Compute multiclass roc_auc separately with all probability columns
+pca_multinom_roc_auc_res <- (
+  predict_pca_multinom
+  |> roc_auc(
+    truth = species,
+    c(.pred_lakeTrout, .pred_lakeWhitefish, .pred_smallmouthBass),
+    estimator = "hand_till"
+  )
+)
+
+
+## Model Performance
+## confusion matrix
+cat("\nConfusion Matrix:\n")
+print(conf_mat(predict_pca_multinom, truth = species, estimate = .pred_class))
+
+cat("\nModel Performance Metrics:\n")
+print(performance_pca_multinom)
+
+## PCA laoding contributions
+pca_multinom_loadings <- pca_multinom_model$rotation[, "PC1"]
+pca_multinom_loadings_contributions_tbl <- (
+  tibble(
+    Frequency = names(pca_multinom_loadings),
+    Loading = pca_multinom_loadings,
+    Absolute_Loading = abs(pca_multinom_loadings)
+  )
+  |> arrange(desc(Absolute_Loading))
+)
+
+head(pca_multinom_loadings_contributions_tbl, 20)
+```
+
+
+### Random Forest
+
+```{r}
+set.seed(2453)
+
+## Random Forest
+## define recipe
+rf_recipe <- (
+  recipe(species ~ ., data = train_raw_data)
+  |> update_role(fishNum, new_role = "ID")
+)
+
+## define random forest model
+rf_model <- (
+  rand_forest(
+    trees = tune(),
+    mtry = tune(),
+    min_n = tune()
+  )
+  |> set_engine("ranger", importance = "impurity")
+  |> set_mode("classification")
+)
+
+## workflow assemble
+rf_wf <- (
+  workflow()
+  |> add_recipe(rf_recipe)
+  |> add_model(rf_model)
+)
+
+## tune hyperparameters
+rf_folds <- vfold_cv(train_raw_data, v = 5)
+rf_grid <- grid_regular(
+  trees(range = c(100, 500)), # 300  600  900 1200 1500
+  mtry(range = c(10, 50)),    # 10  32  55  77 100
+  min_n(range = c(1, 20)),     # 1  5 10 15 20
+  levels = 5
+)
+
+## took 6 hours to tune
+# rf_tuned_model <- (
+#   rf_wf
+#   |> tune_grid(
+#     resamples = rf_folds,
+#     grid = rf_grid,
+#     metrics = metric_set(accuracy)
+#     )
+#   )
+# ## save to RDS
+# save(rf_tuned_model, file = here::here("Output", "Data", "02_RF_Tuned_Models.rds"))
+```
+
+
+```{r}
+## load tuned models
+load(here::here("Output", "Data", "02_RF_Tuned_Models.rds"))
+# Select the best hyperparameters
+rf_best_parameters <- rf_tuned_model |> tune::select_best(metric = "accuracy")
+rf_best_parameters
+
+## finalize the best model for prediction
+fit_rf_best <- (
+  rf_wf
+  |> finalize_workflow(rf_best_parameters)
+  |> fit(train_raw_data)
+)
+
+## predict on the test data
+predict_rf_best <- (
+  test_raw_data
+  |> bind_cols(
+    predict(fit_rf_best, new_data = test_raw_data),
+    predict(fit_rf_best, new_data = test_raw_data, type = "prob")
+    )
+  |> mutate(species = factor(species))
+)
+
+## performance metrics
+rf_metric <- metric_set(accuracy)
+performance_rf_best <- (
+  predict_rf_best
+  |> rf_metric(
+    truth = species,
+    estimate = .pred_class
+  )
+)
+
+
+## Model Performance
+
+## create tibble to store predictions for model performance comparison
+rf_predictions <- tibble(
+  fishNum = test_std_data$fishNum,
+  species = test_std_data$species,
+  pred_class = predict_rf_best$.pred_class
+)
+
+## count majority predictions on ping data for a single fish
+## to determine the dnn prediction for this fish
+rf_fish_level_pred <- (
+  rf_predictions
+  |> group_by(fishNum)
+  |> summarise(
+    pred_class = names(which.max(table(pred_class))),
+    species = first(species)
+  )
+  |> mutate(
+    pred_class = factor(pred_class, levels = all_species),
+    species = factor(species, levels = all_species)
+  )
+)
+rf_fish_level_pred
+
+## compute and show ping predictions counts
+rf_predictions_count <- (
+  rf_predictions
+  |> group_by(fishNum, species, pred_class)
+  |> summarise(n = n(), .groups = "drop")
+  |> pivot_wider(
+    names_from = pred_class,
+    values_from = n,
+    values_fill = 0,
+    names_prefix = "Pred_"
+  )
+)
+rf_predictions_count$Pred_class <- rf_fish_level_pred$pred_class 
+rf_predictions_count
+
+# Compute accuracy
+rf_accuracy <- (
+  rf_fish_level_pred
+  |> accuracy(truth = species, estimate = pred_class)
+)
+
+## confusion matrix
+rf_conf_mat <- (
+  rf_fish_level_pred
+  |> conf_mat(truth = species, estimate = pred_class)
+)
+
+## Output
+## confusion matrix
+cat("\nConfusion Matrix:\n")
+print(rf_conf_mat)
+
+cat("\nModel Performance Metrics:\n")
+print(rf_accuracy)
+```
+
+
+
+### Deep Nerual Network
+
+```{r}
+set.seed(2453)
+
+#### some useful note
+#### install.package("keras")
+#### install.package("tensorflow)"
+#### library(tensorflow)
+#### install_tensorflow(version = "2.13.1")
+#### for model to run properly
+
+## Nerual Networks
+## prepare data
+train_dnn_data <- (
+  train_std_data
+  |> mutate(species = factor(species))
+  |> select(-fishNum)
+)
+
+test_dnn_data <- (
+  test_std_data
+  |> mutate(species = factor(species))
+  |> select(-fishNum)
+)
+
+## separate features and lables
+
+## train
+train_dnn_x <- (
+  train_dnn_data
+  |> dplyr::select(starts_with(("F")))
+  |> as.matrix()
+)
+
+train_dnn_y <- (
+  train_dnn_data
+  |> pull(species)
+  |> as.numeric() - 1
+)
+
+## test
+test_dnn_x <- (
+  test_dnn_data
+  |> dplyr::select(starts_with(("F")))
+  |> as.matrix()
+)
+
+test_dnn_y <- (
+  test_dnn_data
+  |> pull(species)
+  |> as.numeric() - 1
+)
+
+## one-hot encode labels 
+train_dnn_y <- to_categorical(train_dnn_y, num_classes = num_classes)
+test_dnn_y <- to_categorical(test_dnn_y, num_classes = num_classes)
+
+## DNN model
+## define model with 3 hidden layers
+dnn_model <- (
+  keras_model_sequential()
+  |> layer_dense(units = 128, activation = 'relu', input_shape = ncol(train_dnn_x))
+  |> layer_dropout(rate = 0.2)
+  |> layer_dense(units = 64, activation = 'relu')
+  |> layer_dropout(rate = 0.2)
+  |> layer_dense(units = 32, activation = "relu")
+  |> layer_dense(units = num_classes, activation = "softmax")
+)
+
+## compile the model
+(
+  dnn_model
+  |> compile(
+    loss = "categorical_crossentropy",
+    optimizer = optimizer_adam(learning_rate = 0.001),
+    metrics = "accuracy"
+  )
+)
+
+## create validation sets for model development
+dnn_grouped_data <- (
+  train_std_data
+  |> mutate(group = fishNum)
+  # |> group_by(group)
+  # |> nest()
+)
+## create folds
+dnn_folds <- group_initial_split(dnn_grouped_data, group = "fishNum", prop = 0.7)
+train_dnn_folds <- (
+  training(dnn_folds)
+)
+val_dnn_folds <- (
+  testing(dnn_folds)
+)
+
+val_dnn_x <- (
+  val_dnn_folds
+  |> select(-fishNum)
+  |> select(starts_with("F"))
+  |> as.matrix()
+)
+val_dnn_y <- (
+  val_dnn_folds
+  |> mutate(species = factor(species))
+  |> pull(species)
+  |> as.numeric() - 1
+)
+val_dnn_y <- to_categorical(val_dnn_y, num_classes = num_classes)
+
+## train model
+dnn_history <- (
+  dnn_model
+  |> fit(
+    x = train_dnn_x,
+    y = train_dnn_y,
+    epochs = 100,
+    batch_size = 32,
+    validation_data = list(val_dnn_x, val_dnn_y),
+    verbose = 1
+  )
+)
+
+## evaluate model
+(
+  dnn_model
+  |> evaluate(test_dnn_x, test_dnn_y)
+)
+
+## predict
+predict_dnn <- (
+  dnn_model
+  |> predict(test_dnn_x)
+  |> k_argmax()
+)
+predict_dnn
+```
+
+```{r}
+## Convert history to a tibble
+dnn_history_df <- as.data.frame(dnn_history$metrics)
+dnn_history_df$epoch <- seq(from = 1, to = 100)
+dnn_history_df
+
+## Plot loss
+ggplot(dnn_history_df, aes(x = epoch)) +
+  geom_line(aes(y = loss, color = "Training Loss")) +
+  geom_line(aes(y = val_loss, color = "Validation Loss")) +
+  labs(title = "Training vs. Validation Loss", y = "Loss", x = "Epoch") +
+  theme_minimal()
+
+## Plot accuracy
+ggplot(dnn_history_df, aes(x = epoch)) +
+  geom_line(aes(y = accuracy, color = "Training Accuracy")) +
+  geom_line(aes(y = val_accuracy, color = "Validation Accuracy")) +
+  labs(title = "Training vs. Validation Accuracy", y = "Accuracy", x = "Epoch") +
+  theme_minimal()
+```
+
+```{r}
+## Model Performance
+## convert prediction to numeric values
+dnn_pred_classes <- as.numeric(predict_dnn$numpy())
+
+## create tibble to store predictions for model performance comparison
+dnn_predictions <- tibble(
+  fishNum = test_std_data$fishNum,
+  species = test_std_data$species,
+  pred_class = dnn_pred_classes
+)
+
+## count majority predictions on ping data for a single fish
+## to determine the dnn prediction for this fish
+dnn_fish_level_pred <- (
+  dnn_predictions
+  |> group_by(fishNum)
+  |> summarise(
+    pred_class = as.integer(names(which.max(table(pred_class)))),
+    species = first(species)
+  )
+  |> ungroup()
+  |> mutate(
+    pred_class = case_when(
+      pred_class == 0 ~ "lakeTrout",
+      pred_class == 1 ~ "lakeWhitefish",
+      pred_class == 2 ~ "smallmouthBass",
+      TRUE ~ NA_character_ ## set default case for any other values
+    ),
+    species = factor(species, levels = all_species),
+    pred_class = factor(pred_class, levels = all_species)
+  )
+)
+
+## compute and show ping predictions counts
+dnn_predictions_count <- (
+  dnn_predictions
+  |> group_by(fishNum, species, pred_class)
+  |> summarise(n = n(), .groups = "drop")
+  |> pivot_wider(
+    names_from = pred_class,
+    values_from = n,
+    values_fill = 0,
+    names_prefix = "Pred_"
+  )
+) 
+dnn_predictions_count$Pred_class <- dnn_fish_level_pred$pred_class 
+
+dnn_predictions_count
+
+# Compute accuracy
+dnn_accuracy <- (
+  dnn_fish_level_pred
+  |> accuracy(truth = species, estimate = pred_class)
+)
+
+## confusion matrix
+dnn_conf_mat <- (
+  dnn_fish_level_pred
+  |> conf_mat(truth = species, estimate = pred_class)
+)
+  
+## Output
+## confusion matrix
+cat("\nConfusion Matrix:\n")
+print(dnn_conf_mat)
+
+cat("\nModel Performance Metrics:\n")
+print(dnn_accuracy)
+```
+
+
+### LSTM
+
+```{r}
+## LSTM models
+
+create_pad_sequence <- function(m, max_length) {
+  # Validate input is a matrix
+  if (!is.matrix(m)) {
+    stop("Input must be a matrix")
+  }
+  
+  n_rows <- nrow(m)
+  
+  if (n_rows < max_length) {
+    # Pad with zeros
+    pad_rows <- max_length - n_rows
+    padded <- matrix(0, nrow = pad_rows, ncol = ncol(m))
+    rbind(m, padded)
+  } else if (n_rows > max_length) {
+    # Truncate to max_length
+    m[1:max_length, , drop = FALSE]
+  } else {
+    # Return as-is
+    m
+  }
+}
+
+## prepare data
+## want to convert list strcture to 3D array [fish, pings, features]
+
+## find max pings per fish
+train_ping_max_length <- max(map_dbl(train_seq_data$sequences, ~ dim(.)[1]))
+test_ping_max_length <- max(map_dbl(test_seq_data$sequences, ~ dim(.)[1]))
+lstm_ping_max_length <- max(train_ping_max_length, test_ping_max_length)
+# train_ping_max_length <- 800
+# test_ping_max_length <- 800
+## number of frequency bands
+train_num_features <- dim(train_seq_data$sequences[[1]])[2]
+test_num_features <- dim(test_seq_data$sequences[[1]])[2]
+
+## create 3d array
+train_seq_array <- (
+  train_seq_data$sequences
+  |> map(function(x) create_pad_sequence(x, lstm_ping_max_length))
+  |> unname()
+  |> abind::abind(along = 3)
+  |> aperm(c(3, 1, 2))
+)
+
+test_seq_array <- (
+  test_seq_data$sequences
+  |> map(function(x) create_pad_sequence(x, lstm_ping_max_length))
+  |> unname()
+  |> abind::abind(along = 3)
+  |> aperm(c(3, 1, 2))
+)
+
+## define train sets
+train_lstm_y <- (
+  train_seq_data$species
+  |> factor(levels = all_species)
+  |> as.numeric() - 1
+)
+
+train_lstm_y <- to_categorical(train_lstm_y, num_classes = num_classes)
+
+## define test sets
+test_lstm_y <- (
+  test_seq_data$species
+  |> factor(levels = all_species)
+  |> as.numeric() - 1
+)
+
+test_lstm_y <- to_categorical(test_lstm_y, num_classes = num_classes)
+```
+
+
+```{r}
+## define model with 3 hidden layers
+lstm_model <- (
+  keras_model_sequential()
+  ## mask layer to ignore padded values with 0
+  |> layer_masking(
+    mask_value = 0,
+    input_shape = c(lstm_ping_max_length, train_num_features), ## (time_steps, features)
+  )
+  # |> layer_batch_normalization()
+  # |> layer_lstm(
+  #   units = 256,
+  #   return_sequences = TRUE
+  # )
+  # |> layer_dropout(rate = 0.2)
+  
+  # |> layer_lstm(
+  #   units = 64,
+  #   kernel_regularizer = regularizer_l2(0.0001),
+  #   return_sequences = TRUE
+  # )
+  # |> layer_dropout(rate = 0.2)
+  # |> layer_lstm(
+  #   units = 64,
+  #   # kernel_regularizer = regularizer_l2(0.0001),
+  #   return_sequences = TRUE
+  # )
+  # |> layer_dropout(rate = 0.3)
+  |> layer_lstm(units = 64)
+                # kernel_regularizer = regularizer_l2(0.0001))
+  |> layer_dropout(rate = 0.4)
+  ## classification layers
+  |> layer_dense(units = 32, activation = "relu")
+  |> layer_dropout(rate = 0.4)
+  # |> layer_dense(units = 16, activation = "relu")
+  |> layer_dense(units = num_classes, activation = "softmax")
+)
+
+lstm_model <- (
+  keras_model_sequential()
+  |> layer_masking(
+    mask_value = 0,
+    input_shape = c(lstm_ping_max_length, train_num_features)
+  )
+  |> layer_lstm(
+    units = 128,  # Slightly larger first layer to capture the 263 features
+    return_sequences = TRUE,  # Return sequences for stacked LSTM
+    kernel_regularizer = regularizer_l2(0.001)
+  )
+  |> layer_dropout(rate = 0.4)
+  |> layer_lstm(
+    units = 64,  # Second LSTM layer to capture higher-level patterns
+    kernel_regularizer = regularizer_l2(0.001)
+  )
+  |> layer_dropout(rate = 0.4)
+  |> layer_dense(
+    units = 32, 
+    activation = "relu",
+    kernel_regularizer = regularizer_l2(0.001)
+  )
+  |> layer_dropout(rate = 0.4)
+  |> layer_dense(units = 3, activation = "softmax")
+)
+
+## compile model
+(
+  lstm_model
+  |> compile(
+    loss = "categorical_crossentropy",
+    optimizer = optimizer_adam(learning_rate = 0.005),
+    # optimizer = optimizer_adam(learning_rate = 0.001, weight_decay = 0.0005),
+    metrics = "accuracy"
+  )
+)
+
+## create validation sets for model development
+train_fishNum <- unique(train_seq_data$fishNum)
+# lstm_val_fishNum <- sample(train_fishNum,
+#                            size = floor(0.2 * length(train_fishNum)))
+lstm_val_fishNum <- (
+  train_std_data
+  |> distinct(species, fishNum)  # Get unique species-fishNum combinations
+  |> group_by(species)
+  |> slice_sample(prop = 0.2)
+  |> pull(fishNum)
+)
+
+## split data using fishNum
+train_lstm_idx <- which(!train_seq_data$fishNum %in% lstm_val_fishNum)
+val_lstm_idx <- which(train_seq_data$fishNum %in% lstm_val_fishNum)
+
+
+class_counts <- table(train_seq_data$species)
+total <- sum(class_counts)
+class_weights <- list(
+  "0" = total / (num_classes * class_counts[1]),  # LakeTrout
+  "1" = total / (num_classes * class_counts[2]),  # LakeWhitefish
+  "2" = total / (num_classes * class_counts[3])   # smallmouthBass
+)
+
+## sample weights
+# Create weights based on sequence length (giving more weight to shorter sequences)
+sequence_lengths <- map_dbl(train_seq_data$sequences, ~ nrow(.))
+
+# Option 1: Inverse weighting (shorter sequences get more weight)
+sample_weights <- 1 / (sequence_lengths + 1)  # Adding 1 to avoid division by zero
+
+# Option 2: Normalize weights to sum to n_samples
+sample_weights <- sample_weights * (length(sample_weights) / sum(sample_weights))
+
+# Select only weights for training samples
+train_sample_weights <- sample_weights[train_lstm_idx]
+
+## train model
+lstm_history <- (
+  lstm_model
+  |> fit(
+    x = train_seq_array[train_lstm_idx, , ],
+    y = train_lstm_y[train_lstm_idx, ],
+    epochs = 100,
+    batch_size = 16,
+    validation_data = list(
+      train_seq_array[val_lstm_idx, , ],
+      train_lstm_y[val_lstm_idx, ]
+    ),
+    callbacks = list(
+      callback_early_stopping(patience = 15),
+      callback_reduce_lr_on_plateau(factor = 0.5, patience = 5)
+    ),
+    # callbacks = callbacks_list,
+    # sample_weight = train_sample_weights,
+    class_weight = class_weights,
+    verbose = 1
+  )
+)
+```
+
+
+```{r}
+set.seed(2453)
+
+## LSTM models
+
+## prepare data
+## want to convert list strcture to 3D array [fish, pings, features]
+
+## find max pings per fish
+train_ping_max_length <- max(map_dbl(train_seq_data$sequences, ~ dim(.)[1]))
+test_ping_max_length <- max(map_dbl(test_seq_data$sequences, ~ dim(.)[1]))
+lstm_ping_max_length <- max(train_ping_max_length, test_ping_max_length)
+# train_ping_max_length <- 800
+# test_ping_max_length <- 800
+## number of frequency bands
+train_num_features <- dim(train_seq_data$sequences[[1]])[2]
+test_num_features <- dim(test_seq_data$sequences[[1]])[2]
+
+## padding dunction
+# create_pad_sequence <- function(m, max_length) {
+#   # rbind(m,
+#   #       matrix(0,
+#   #              nrow = max_length - nrow(m),
+#   #              ncol = ncol(m)))
+#   
+#   if (nrow(m) < max_length) {
+#     padded <- matrix(0,
+#                      nrow = max_length - nrow(m),
+#                      ncol = ncol(m))
+#     return(rbind(m, padded))
+#   } else if (is.list(m)) {
+#     # If m is a list, recursively apply the function to each element
+#     return(lapply(m, function(x) create_pad_sequence(x, max_length)))
+#   } else {
+#     return(m[1:max_length, , drop = FALSE])
+#   }
+  
+  # if (is.matrix(m) || is.data.frame(m)) {
+  #   if (nrow(m) < max_length) {
+  #     # If sequence is shorter than max_length, pad it
+  #     padded <- matrix(0,
+  #                      nrow = max_length - nrow(m),
+  #                      ncol = ncol(m))
+  #     return(rbind(m, padded))
+  #   } else {
+  #     # If sequence is longer or equal to max_length, truncate it
+  #     return(m[1:max_length, , drop = FALSE])
+  #   }
+  # } else if (is.list(m)) {
+  #   # If m is a list, recursively apply the function to each element
+  #   return(lapply(m, function(x) create_pad_sequence(x, max_length)))
+  # } else {
+  #   stop("Input must be a matrix, data frame, or list of matrices")
+  # }
+# }
+
+create_pad_sequence <- function(m, max_length) {
+  # Validate input is a matrix
+  if (!is.matrix(m)) {
+    stop("Input must be a matrix")
+  }
+  
+  n_rows <- nrow(m)
+  
+  if (n_rows < max_length) {
+    # Pad with zeros
+    pad_rows <- max_length - n_rows
+    padded <- matrix(0, nrow = pad_rows, ncol = ncol(m))
+    rbind(m, padded)
+  } else if (n_rows > max_length) {
+    # Truncate to max_length
+    m[1:max_length, , drop = FALSE]
+  } else {
+    # Return as-is
+    m
+  }
+}
+
+## create 3d array
+train_seq_array <- (
+  train_seq_data$sequences
+  |> map(function(x) create_pad_sequence(x, lstm_ping_max_length))
+  |> unname()
+  |> abind::abind(along = 3)
+  |> aperm(c(3, 1, 2))
+)
+
+test_seq_array <- (
+  test_seq_data$sequences
+  |> map(function(x) create_pad_sequence(x, lstm_ping_max_length))
+  |> unname()
+  |> abind::abind(along = 3)
+  |> aperm(c(3, 1, 2))
+)
+
+## define train sets
+train_lstm_y <- (
+  train_seq_data$species
+  |> factor(levels = all_species)
+  |> as.numeric() - 1
+)
+
+train_lstm_y <- to_categorical(train_lstm_y, num_classes = num_classes)
+
+## define test sets
+test_lstm_y <- (
+  test_seq_data$species
+  |> factor(levels = all_species)
+  |> as.numeric() - 1
+)
+
+test_lstm_y <- to_categorical(test_lstm_y, num_classes = num_classes)
+
+## define model with 3 hidden layers
+lstm_model <- (
+  keras_model_sequential()
+  ## mask layer to ignore padded values with 0
+  |> layer_masking(
+    mask_value = 0,
+    input_shape = c(lstm_ping_max_length, train_num_features), ## (time_steps, features)
+  )
+  |> layer_batch_normalization()
+  # |> layer_lstm(
+  #   units = 256,
+  #   return_sequences = TRUE
+  # )
+  # |> layer_dropout(rate = 0.2)
+  
+  # |> layer_lstm(
+  #   units = 64,
+  #   kernel_regularizer = regularizer_l2(0.0001),
+  #   return_sequences = TRUE
+  # )
+  # |> layer_dropout(rate = 0.2)
+  |> layer_lstm(
+    units = 128,
+    kernel_regularizer = regularizer_l2(0.0001),
+    return_sequences = TRUE
+  )
+  |> layer_dropout(rate = 0.3)
+  |> layer_lstm(units = 64,
+                kernel_regularizer = regularizer_l2(0.0001))
+  |> layer_dropout(rate = 0.3)
+  ## classification layers
+  |> layer_dense(units = 64, activation = "relu")
+  |> layer_dense(units = 3, activation = "softmax")
+)
+
+# lstm_model <- ( keras_model_sequential() |> layer_masking(mask_value = 0, input_shape = c(lstm_ping_max_length, train_num_features)) |> layer_batch_normalization() |> layer_bidirectional(layer_lstm(units = 64, return_sequences = TRUE, kernel_regularizer = regularizer_l2(0.001))) |> layer_dropout(rate = 0.3) |> layer_lstm(units = 32, kernel_regularizer = regularizer_l2(0.001)) |> layer_dropout(rate = 0.3) |> layer_dense(units = 32, activation = "relu", kernel_regularizer = regularizer_l1_l2(l1 = 0.0001, l2 = 0.001)) |> layer_dense(units = 3, activation = "softmax") )
+
+## compile model
+(
+  lstm_model
+  |> compile(
+    loss = "categorical_crossentropy",
+    optimizer = optimizer_adam(learning_rate = 0.005),
+    # optimizer = optimizer_adam(learning_rate = 0.001, weight_decay = 0.0005),
+    # optimizer = optimizer_rmsprop(learning_rate = 0.001, rho = 0.9),
+    # optimizer_adadelta(learning_rate = 1.0, rho = 0.95),
+    metrics = "accuracy"
+  )
+)
+
+## create validation sets for model development
+train_fishNum <- unique(train_seq_data$fishNum)
+# lstm_val_fishNum <- sample(train_fishNum,
+#                            size = floor(0.2 * length(train_fishNum)))
+lstm_val_fishNum <- (
+  train_std_data
+  |> distinct(species, fishNum)  # Get unique species-fishNum combinations
+  |> group_by(species)
+  |> slice_sample(prop = 0.2)
+  |> pull(fishNum)
+)
+
+## split data using fishNum
+train_lstm_idx <- which(!train_seq_data$fishNum %in% lstm_val_fishNum)
+val_lstm_idx <- which(train_seq_data$fishNum %in% lstm_val_fishNum)
+
+# train_lstm_idx <- createDataPartition(
+#   train_seq_data$species,
+#   p = 0.9,
+#   list = FALSE
+# )
+# val_lstm_idx <- setdiff(1:length(train_seq_data$species), train_lstm_idx)
+
+class_counts <- table(train_seq_data$species)
+total <- sum(class_counts)
+class_weights <- list(
+  "0" = total / (num_classes * class_counts[1]),  # LakeTrout
+  "1" = total / (num_classes * class_counts[2]),  # LakeWhitefish
+  "2" = total / (num_classes * class_counts[3])   # smallmouthBass
+)
+
+# callbacks_list <- list(
+#   # Early stopping with shorter patience
+#   callback_early_stopping(
+#     monitor = "val_loss",
+#     patience = 7,
+#     restore_best_weights = TRUE
+#   ),
+#   
+#   # More gradual learning rate reduction
+#   callback_reduce_lr_on_plateau(
+#     monitor = "val_loss",
+#     factor = 0.5,  # Reduce by half instead of by 90%
+#     patience = 3,
+#     min_lr = 1e-6
+#   )
+# )
+# 
+# confusion_matrix_callback <- callback_lambda(
+#   on_epoch_end = function(epoch, logs) {
+#     # Only calculate every N epochs to save time
+#     if (epoch %% 5 == 0) {  # Calculate every 5 epochs
+#       # Get predictions on validation data
+#       val_pred <- predict(lstm_model, train_seq_array[val_lstm_idx, , ])
+#       val_pred_classes <- max.col(val_pred) - 1
+#       
+#       # Get true classes
+#       val_true_classes <- max.col(train_lstm_y[val_lstm_idx, ]) - 1
+#       
+#       # Create confusion matrix
+#       cm <- table(Predicted = val_pred_classes, Actual = val_true_classes)
+#       
+#       # Print to console
+#       cat("\nEpoch", epoch, "Confusion Matrix:\n")
+#       print(cm)
+#       
+#       # Calculate per-class metrics
+#       n <- sum(cm)
+#       diag <- diag(cm)
+#       precision <- diag / colSums(cm)
+#       recall <- diag / rowSums(cm)
+#       f1 <- 2 * precision * recall / (precision + recall)
+#       
+#       cat("\nPrecision:", precision, "\n")
+#       cat("Recall:", recall, "\n")
+#       cat("F1 Score:", f1, "\n\n")
+#     }
+#   }
+# )
+
+# Add this callback to your callbacks list
+callbacks_list <- c(callbacks_list, list(confusion_matrix_callback))
+
+
+## sample weights
+# Create weights based on sequence length (giving more weight to shorter sequences)
+sequence_lengths <- map_dbl(train_seq_data$sequences, ~ nrow(.))
+
+# Option 1: Inverse weighting (shorter sequences get more weight)
+sample_weights <- 1 / (sequence_lengths + 1)  # Adding 1 to avoid division by zero
+
+# Option 2: Normalize weights to sum to n_samples
+sample_weights <- sample_weights * (length(sample_weights) / sum(sample_weights))
+
+# Select only weights for training samples
+train_sample_weights <- sample_weights[train_lstm_idx]
+
+## train model
+lstm_history <- (
+  lstm_model
+  |> fit(
+    x = train_seq_array[train_lstm_idx, , ],
+    y = train_lstm_y[train_lstm_idx, ],
+    epochs = 100,
+    batch_size = 32,
+    validation_data = list(
+      train_seq_array[val_lstm_idx, , ],
+      train_lstm_y[val_lstm_idx, ]
+    ),
+    callbacks = list(
+      callback_early_stopping(patience = 10),
+      callback_reduce_lr_on_plateau(factor = 0.1, patience = 5)
+    ),
+    # callbacks = callbacks_list,
+    # sample_weight = train_sample_weights,
+    class_weight = class_weights,
+    verbose = 1
+  )
+)
+```
+
+
+```{r}
+test_seq_array
+```
+
+
+```{r}
+## Evaluation
+# Convert predictions to labels
+get_pred_labels <- function(pred_probs) {
+  pred_indices <- k_argmax(pred_probs) %>% as.numeric()
+  all_species[pred_indices + 1]
+}
+
+## predict with test set
+test_lstm_probs <- predict(lstm_model, test_seq_array)
+test_lstm_preds <- test_lstm_probs |> get_pred_labels()
+test_lstm_probs
+test_lstm_preds
+
+## create tibble to store predictions for model performance comparison
+lstm_predictions <- tibble(
+  fishNum = test_seq_data$fishNum,
+  species = test_seq_data$species,
+  pred_class = test_lstm_preds
+)
+lstm_fish_level_pred <- (
+  lstm_predictions
+  |> mutate(
+    species = factor(species, levels = all_species),
+    pred_class = factor(pred_class, levels = all_species)
+  )
+)
+
+# Compute accuracy
+lstm_accuracy <- (
+  lstm_fish_level_pred
+  |> accuracy(truth = species, estimate = pred_class)
+)
+
+## confusion matrix
+lstm_conf_mat <- (
+  lstm_fish_level_pred
+  |> conf_mat(truth = species, estimate = pred_class)
+)
+  
+## Output
+## confusion matrix
+cat("\nConfusion Matrix:\n")
+print(lstm_conf_mat)
+
+cat("\nModel Performance Metrics:\n")
+print(lstm_accuracy)
+```
+
+
+```{r}
+## create tibble to store predictions for model performance comparison
+dnn_predictions <- tibble(
+  fishNum = test_std_data$fishNum,
+  species = test_std_data$species,
+  pred_class = dnn_pred_classes
+)
+
+## count majority predictions on ping data for a single fish
+```
+
+
+```{r}
+test_seq_data$species
+```
+
+```{r}
+(
+  train_std_data
+  |> group_by(species)
+  |> summarise(fishNum = unique(fishNum))
+  # |> data.frame(fishNum = _)
+  |> slice_sample(prop = 0.3)
+  |> pull(fishNum)
+)
+```
+
+```{r}
+(
+  train_std_data
+  |> distinct(species, fishNum)  # Get unique species-fishNum combinations
+  |> group_by(species)
+  |> slice_sample(prop = 0.3)
+  |> pull(fishNum)
+)
+```
+
+
+```{r}
+train_seq_array <- (
+  train_seq_data$sequences
+  |> map(function(x) pad_sequences(x, train_ping_max_length))
+  |> unname()
+  |> abind::abind(along = 3)
+  |> aperm(c(3, 1, 2))
+)
+```
+
+```{r}
+(
+  train_seq_data$sequences
+  |> map(function(x) pad_sequences(x, train_ping_max_length))
+  |> abind::abind(along = 3)
+)
+```
+
+```{r}
+one <- pad_sequences(train_seq_data$sequences, train_ping_max_length)
+map(train_seq_data$sequences, one) |> dim()
+```
+
+
+```{r}
+length(train_seq_data$sequences)
+```
+
+
+```{r}
+sequence_info <- data.frame(
+  fishNum = train_seq_data$fishNum,
+  species = train_seq_data$species,
+  num_rows = map_dbl(train_seq_data$sequences, nrow),
+  num_cols = map_dbl(train_seq_data$sequences, ncol)
+)
+sequence_info
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

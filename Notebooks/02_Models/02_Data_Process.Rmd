@@ -1,0 +1,207 @@
+---
+title: "02_Data_Process"
+knit: (function(input, encoding) {
+  rmarkdown::render(input = input,
+                    output_format = "html_document",
+                    output_dir = here::here("Output", "HTML"),
+                    knit_root_dir = rprojroot::find_rstudio_root_file())})
+  # rmarkdown::render(input = input,
+  #                   output_format = "pdf_document",
+  #                   output_dir = here::here("Output", "PDF"),
+  #                   knit_root_dir = rprojroot::find_rstudio_root_file())})
+output:
+  html_document: 
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document: 
+    toc: yes
+date: "2025-03-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r warning=FALSE, message=FALSE}
+library(dplyr)
+library(caret)
+library(keras)
+library(purrr)
+library(ggplot2)
+library(recipes)
+library(reshape2)
+library(ggridges)
+library(gridExtra)
+library(patchwork)
+library(tidymodels)
+library(FactoMineR)
+```
+
+
+## Load
+
+Loading Pre-processed data provided
+
+```{r}
+## load
+load(here::here("Data", "ProcessedData", "processed_AnalysisData.Rdata"))
+```
+
+```{r}
+processed_data
+```
+
+```{r}
+## variable names in data
+names(processed_data)
+```
+
+
+## Data Preparation
+
+1. We only focuses on the target strength data from the fish species, thus, we first only create a dataframe that contains the frequency response across all pings for fish.
+
+```{r}
+frequency_data <- (
+  processed_data
+  |> dplyr::select(c(1, 5, 59:481))
+)
+frequency_data |> head()
+```
+
+
+2. We next remove the fish `LT008` because it is missing all high frequency data from `F173` to `F258.5` for all pings, where results in a total of 31476 `NA` value and fill in values is not meaningful at all.
+
+```{r}
+frequency_data <- (
+  frequency_data
+  |> filter(fishNum != "LT008")
+)
+unique(frequency_data$fishNum)
+```
+
+3. We then remove the data columns `F90` to `F170` because they did not record in the original data, where all columns are `NA` values for all ping data and all fish.
+
+```{r}
+frequency_data <- frequency_data |> dplyr::select(-c(93:253))
+```
+
+4. Prepare class levels and number of classes in the data for model development use
+
+```{r}
+all_species <- unique(frequency_data$species)
+num_classes <- length(all_species)
+```
+
+### Train and Test set by fishNum
+
+We then want to create a train and test set by fish ID. We want to randomly choose 70% Train set and 30% Test set.
+
+```{r}
+set.seed(2453)
+
+## unique fish id
+unique_fishNum <- frequency_data |> distinct(fishNum, species)
+
+## create stratified split
+train_indices <- createDataPartition(
+  unique_fishNum$species,
+  p = 0.8,
+  list = FALSE
+)
+
+## create train/test fish ID set
+train_fish <- unique_fishNum[train_indices, ]
+test_fish <- unique_fishNum[-train_indices, ]
+
+## split into train/test set
+train_data <- frequency_data |> filter(fishNum %in% train_fish$fishNum)
+test_data <- frequency_data |> filter(fishNum %in% test_fish$fishNum)
+dim(train_data)
+dim(test_data)
+```
+
+
+### Prepare Data for different models
+
+We want to create a classification system that using the following models:
+
+1. Logistics regression (with PCA)
+2. Random Forest (Raw data)
+3. Deep Neural Network (Raw data)
+4. LSTM (Raw Sequence data)
+5. LSTM with attention layer (Raw Sequence data)
+6. CNN (Raw Sequence data)
+
+We need to prepare three type od data.
+```{r}
+## standardized data
+preProc <- preProcess(train_data, method = c("center", "scale"))
+train_std_data <- predict(preProc, train_data)
+test_std_data <- predict(preProc, test_data)
+
+## raw data
+train_raw_data <- train_data
+test_raw_data <- test_data
+
+## create sequence data
+create_sequences_data <- function(data) {
+  
+  ## group by fish
+  grouped_data <- (
+    data
+    |> group_by(fishNum)
+    |> mutate(n_pings = n())
+    |> ungroup()
+    |> group_split(fishNum)
+  )
+  
+  # Extract metadata
+  labels <- map_chr(grouped_data, ~ unique(.x$species))
+  # labels <- unique(grouped_data$species)
+  fishNums <- map_chr(grouped_data, ~ unique(.x$fishNum))
+  # fishNums <- unique(grouped_data$fishNum)
+  
+  ## convert to list of matrices
+  sequences <- (
+    grouped_data
+    |> map(~ {
+      freq_cols <- (
+        .x
+        |> dplyr::select(-c(fishNum, species))
+        |> dplyr::select(where(is.numeric))
+      )
+      as.matrix(freq_cols)
+    })
+  )
+  
+  return(list(
+    fishNum = fishNums,
+    species = labels,
+    sequences = sequences
+  ))
+}
+train_seq_data <- create_sequences_data(train_std_data)
+test_seq_data <- create_sequences_data(test_std_data)
+```
+
+
+## Save
+
+```{r}
+# save.image(file = here::here("Output", "Data", "02_Data_Process.RData"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

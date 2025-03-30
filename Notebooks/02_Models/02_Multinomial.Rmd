@@ -1,0 +1,213 @@
+---
+title: "02_Multinomial"
+knit: (function(input, encoding) {
+  rmarkdown::render(input = input,
+                    output_format = "html_document",
+                    output_dir = here::here("Output", "HTML"),
+                    knit_root_dir = rprojroot::find_rstudio_root_file())})
+  # rmarkdown::render(input = input,
+  #                   output_format = "pdf_document",
+  #                   output_dir = here::here("Output", "PDF"),
+  #                   knit_root_dir = rprojroot::find_rstudio_root_file())})
+output:
+  html_document: 
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document: 
+    toc: yes
+date: "2025-03-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r warning=FALSE, message=FALSE}
+library(dplyr)
+library(caret)
+library(keras)
+library(purrr)
+library(ggplot2)
+library(recipes)
+library(reshape2)
+library(ggridges)
+library(gridExtra)
+library(patchwork)
+library(tidymodels)
+library(FactoMineR)
+```
+
+
+## Load
+
+Loading Pre-processed data computed
+
+```{r}
+load(here::here("Output", "Data", "02_Data_Process.RData"))
+```
+
+
+## Multinomial Regression
+
+```{r}
+###############################################################################
+# PCA-Logistic Regression Pipeline with 90% Variance Retention
+# ------------------------------------------------------------
+# This script:
+# 1. Applies PCA to standardized frequency data
+# 2. Retains components explaining ≥90% cumulative variance
+# 3. Trains logistic regression on reduced dimensions
+# 4. Evaluates performance on test set
+###############################################################################
+
+## fish level standard data
+train_std_fish_level_data <- (
+  train_std_data
+  |> group_by(fishNum, species)
+  |> summarise(across(starts_with("F"), mean))
+  |> ungroup()
+)
+
+test_std_fish_level_data <- (
+  test_std_data
+  |> group_by(fishNum, species)
+  |> summarise(across(starts_with("F"), mean))
+  |> ungroup()
+)
+
+## Apply PCA
+## define recipe
+pca_recipe <- (
+  recipe(species ~ ., data = train_std_fish_level_data)
+  ## keeping fishNum but exclude from analysis
+  |> update_role(fishNum, new_role = "ID")
+  ## want PCs at least have 90% variance explained
+  |> step_pca(
+    all_numeric_predictors(),
+    threshold = 0.9,
+    options = list(center = FALSE, scale. = FALSE)
+  )
+)
+
+## define model
+## using multinomial regression
+multinom_model <- (
+  multinom_reg()
+  |> set_engine("nnet")
+  |> set_mode("classification")
+)
+
+## assembly workflow
+pca_multinom_wf <- (
+  workflow()
+  |> add_recipe(pca_recipe)
+  |> add_model(multinom_model)
+)
+
+## train model
+fit_pca_multinom <- (
+  pca_multinom_wf
+  |> fit(data = train_std_fish_level_data)
+)
+
+## Variance Explanation Analysis
+## extract PCA details
+pca_multinom_res <- (
+  extract_preprocessor(fit_pca_multinom)
+  |> prep()
+)
+
+## extract variance explained metrics
+pca_multinom_model <- pca_multinom_res$steps[[1]]$res
+pca_multinom_variance <- pca_multinom_model$sdev^2
+pca_multinom_variance_cum_variance <- cumsum(pca_multinom_variance / sum(pca_multinom_variance))
+
+pca_multinom_variance_tbl <- (
+  tibble(
+    component = paste0("PC", seq_along(pca_multinom_variance_cum_variance)),
+    cumulative_variance = pca_multinom_variance_cum_variance
+  )
+  |> filter(
+    cumulative_variance <= 0.9 | row_number() == which.max(cumulative_variance >= 0.9)
+  )
+)
+
+# print
+cat("\nPCA Variance Explanation:\n")
+print(pca_multinom_variance_tbl)
+cat("Number of components retained:", nrow(pca_multinom_variance_tbl), "\n")
+```
+
+
+```{r}
+## Model Predictions
+## generate test results
+predict_pca_multinom <- (
+  test_std_fish_level_data
+  |> bind_cols(
+    predict(fit_pca_multinom, new_data = test_std_fish_level_data), ## compute class predictions
+    predict(fit_pca_multinom, new_data = test_std_fish_level_data, type = "prob") ## compute probabilities
+  )
+  |> mutate(species = factor(species))
+)
+
+## performance metrics
+model_metrics <- metric_set(accuracy, sensitivity, specificity)
+performance_pca_multinom <- (
+  predict_pca_multinom
+  |> model_metrics(
+    truth = species,
+    estimate = .pred_class
+  )
+)
+
+# Compute multiclass roc_auc separately with all probability columns
+pca_multinom_roc_auc_res <- (
+  predict_pca_multinom
+  |> roc_auc(
+    truth = species,
+    c(.pred_lakeTrout, .pred_lakeWhitefish, .pred_smallmouthBass),
+    estimator = "hand_till"
+  )
+)
+
+
+## Model Performance
+## confusion matrix
+cat("\nConfusion Matrix:\n")
+print(conf_mat(predict_pca_multinom, truth = species, estimate = .pred_class))
+
+cat("\nModel Performance Metrics:\n")
+print(performance_pca_multinom)
+
+## PCA laoding contributions
+pca_multinom_loadings <- pca_multinom_model$rotation[, "PC1"]
+pca_multinom_loadings_contributions_tbl <- (
+  tibble(
+    Frequency = names(pca_multinom_loadings),
+    Loading = pca_multinom_loadings,
+    Absolute_Loading = abs(pca_multinom_loadings)
+  )
+  |> arrange(desc(Absolute_Loading))
+)
+
+head(pca_multinom_loadings_contributions_tbl, 20)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

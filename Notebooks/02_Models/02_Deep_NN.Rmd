@@ -1,0 +1,294 @@
+---
+title: "02_Deep_NN"
+knit: (function(input, encoding) {
+  rmarkdown::render(input = input,
+                    output_format = "html_document",
+                    output_dir = here::here("Output", "HTML"),
+                    knit_root_dir = rprojroot::find_rstudio_root_file())})
+  # rmarkdown::render(input = input,
+  #                   output_format = "pdf_document",
+  #                   output_dir = here::here("Output", "PDF"),
+  #                   knit_root_dir = rprojroot::find_rstudio_root_file())})
+output:
+  html_document: 
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document: 
+    toc: yes
+date: "2025-03-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r warning=FALSE, message=FALSE}
+library(dplyr)
+library(caret)
+library(keras)
+library(purrr)
+library(ggplot2)
+library(recipes)
+library(reshape2)
+library(ggridges)
+library(gridExtra)
+library(patchwork)
+library(tidymodels)
+library(FactoMineR)
+```
+
+
+## Load
+
+Loading Pre-processed data computed
+
+```{r}
+load(here::here("Output", "Data", "02_Data_Process.RData"))
+```
+
+
+## Deep Nerual Network
+
+```{r}
+set.seed(2453)
+
+#### some useful note
+#### install.package("keras")
+#### install.package("tensorflow)"
+#### library(tensorflow)
+#### install_tensorflow(version = "2.13.1")
+#### for model to run properly
+
+## Nerual Networks
+## prepare data
+train_dnn_data <- (
+  train_std_data
+  |> mutate(species = factor(species))
+  |> select(-fishNum)
+)
+
+test_dnn_data <- (
+  test_std_data
+  |> mutate(species = factor(species))
+  |> select(-fishNum)
+)
+
+## separate features and lables
+
+## train
+train_dnn_x <- (
+  train_dnn_data
+  |> dplyr::select(starts_with(("F")))
+  |> as.matrix()
+)
+
+train_dnn_y <- (
+  train_dnn_data
+  |> pull(species)
+  |> as.numeric() - 1
+)
+
+## test
+test_dnn_x <- (
+  test_dnn_data
+  |> dplyr::select(starts_with(("F")))
+  |> as.matrix()
+)
+
+test_dnn_y <- (
+  test_dnn_data
+  |> pull(species)
+  |> as.numeric() - 1
+)
+
+## one-hot encode labels 
+train_dnn_y <- to_categorical(train_dnn_y, num_classes = num_classes)
+test_dnn_y <- to_categorical(test_dnn_y, num_classes = num_classes)
+
+## DNN model
+## define model with 3 hidden layers
+dnn_model <- (
+  keras_model_sequential()
+  |> layer_dense(units = 128, activation = 'relu', input_shape = ncol(train_dnn_x))
+  |> layer_dropout(rate = 0.2)
+  |> layer_dense(units = 64, activation = 'relu')
+  |> layer_dropout(rate = 0.2)
+  |> layer_dense(units = 32, activation = "relu")
+  |> layer_dense(units = num_classes, activation = "softmax")
+)
+
+## compile the model
+(
+  dnn_model
+  |> compile(
+    loss = "categorical_crossentropy",
+    optimizer = optimizer_adam(learning_rate = 0.001),
+    metrics = "accuracy"
+  )
+)
+
+## create validation sets for model development
+dnn_grouped_data <- (
+  train_std_data
+  |> mutate(group = fishNum)
+  # |> group_by(group)
+  # |> nest()
+)
+## create folds
+dnn_folds <- group_initial_split(dnn_grouped_data, group = "fishNum", prop = 0.8)
+train_dnn_folds <- (
+  training(dnn_folds)
+)
+val_dnn_folds <- (
+  testing(dnn_folds)
+)
+
+val_dnn_x <- (
+  val_dnn_folds
+  |> select(-fishNum)
+  |> select(starts_with("F"))
+  |> as.matrix()
+)
+val_dnn_y <- (
+  val_dnn_folds
+  |> mutate(species = factor(species))
+  |> pull(species)
+  |> as.numeric() - 1
+)
+val_dnn_y <- to_categorical(val_dnn_y, num_classes = num_classes)
+
+## train model
+dnn_history <- (
+  dnn_model
+  |> fit(
+    x = train_dnn_x,
+    y = train_dnn_y,
+    epochs = 200,
+    batch_size = 32,
+    validation_data = list(val_dnn_x, val_dnn_y),
+    callbacks = list(
+      callback_early_stopping(patience = 15)
+    ),
+    verbose = 1
+  )
+)
+
+## evaluate model
+(
+  dnn_model
+  |> evaluate(test_dnn_x, test_dnn_y)
+)
+
+## predict
+predict_dnn <- (
+  dnn_model
+  |> predict(test_dnn_x)
+  |> k_argmax()
+)
+predict_dnn
+```
+
+
+```{r}
+## Convert history to a tibble
+dnn_history_df <- as.data.frame(dnn_history$metrics)
+dnn_history_df$epoch <- seq(from = 1, to = length(dnn_history$metrics[[1]]))
+dnn_history_df
+
+## Plot loss
+ggplot(dnn_history_df, aes(x = epoch)) +
+  geom_line(aes(y = loss, color = "Training Loss")) +
+  geom_line(aes(y = val_loss, color = "Validation Loss")) +
+  labs(title = "Training vs. Validation Loss", y = "Loss", x = "Epoch") +
+  theme_minimal()
+
+## Plot accuracy
+ggplot(dnn_history_df, aes(x = epoch)) +
+  geom_line(aes(y = accuracy, color = "Training Accuracy")) +
+  geom_line(aes(y = val_accuracy, color = "Validation Accuracy")) +
+  labs(title = "Training vs. Validation Accuracy", y = "Accuracy", x = "Epoch") +
+  theme_minimal()
+```
+
+
+```{r}
+## Model Performance
+## convert prediction to numeric values
+dnn_pred_classes <- as.numeric(predict_dnn$numpy())
+
+## create tibble to store predictions for model performance comparison
+dnn_predictions <- tibble(
+  fishNum = test_std_data$fishNum,
+  species = test_std_data$species,
+  pred_class = dnn_pred_classes
+)
+
+## count majority predictions on ping data for a single fish
+## to determine the dnn prediction for this fish
+dnn_fish_level_pred <- (
+  dnn_predictions
+  |> group_by(fishNum)
+  |> summarise(
+    pred_class = as.integer(names(which.max(table(pred_class)))),
+    species = first(species)
+  )
+  |> ungroup()
+  |> mutate(
+    pred_class = case_when(
+      pred_class == 0 ~ "lakeTrout",
+      pred_class == 1 ~ "lakeWhitefish",
+      pred_class == 2 ~ "smallmouthBass",
+      TRUE ~ NA_character_ ## set default case for any other values
+    ),
+    species = factor(species, levels = all_species),
+    pred_class = factor(pred_class, levels = all_species)
+  )
+)
+
+## compute and show ping predictions counts
+dnn_predictions_count <- (
+  dnn_predictions
+  |> group_by(fishNum, species, pred_class)
+  |> summarise(n = n(), .groups = "drop")
+  |> pivot_wider(
+    names_from = pred_class,
+    values_from = n,
+    values_fill = 0,
+    names_prefix = "Pred_"
+  )
+) 
+dnn_predictions_count$Pred_class <- dnn_fish_level_pred$pred_class 
+
+dnn_predictions_count
+
+# Compute accuracy
+dnn_accuracy <- (
+  dnn_fish_level_pred
+  |> accuracy(truth = species, estimate = pred_class)
+)
+
+## confusion matrix
+dnn_conf_mat <- (
+  dnn_fish_level_pred
+  |> conf_mat(truth = species, estimate = pred_class)
+)
+  
+## Output
+## confusion matrix
+cat("\nConfusion Matrix:\n")
+print(dnn_conf_mat)
+
+cat("\nModel Performance Metrics:\n")
+print(dnn_accuracy)
+```
+
+
+
+
+
+
+
+
+
+
