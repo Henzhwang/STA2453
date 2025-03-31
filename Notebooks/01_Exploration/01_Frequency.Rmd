@@ -58,7 +58,7 @@ Create a dataframe only containing frequencies.
 ```{r}
 frequency_data <- (
   processed_data
-  |> select(1, 5, 59:481)
+  |> dplyr::select(1, 5, 59:484)
 )
 frequency_data |> head()
 ```
@@ -72,7 +72,7 @@ frequency_data |> head()
 Since we notice the data of F90 to F170 are missing, we want to remove these frequencies columns from our dataset.
 ```{r}
 ## removing columns 93(F90) to 253(F170)
-frequency_data <- frequency_data |> select(-c(93:253))
+frequency_data <- frequency_data |> dplyr::select(-c(93:256))
 ## name(frequency_data)
 ```
 
@@ -227,7 +227,7 @@ create_frequency_density_plot <- function(data, title){
 }
 ```
 
-```{r}
+```{r fig.width=10, fig.height=4, warning=FALSE}
 ## split data into two frequency groups
 ts_mean_allTime_low_long <- ts_mean_allTime_data_long |> filter(Frequency >= 45 & Frequency <= 89.5)
 ts_mean_allTime_high_long <- ts_mean_allTime_data_long |> filter(Frequency >= 173 & Frequency <= 260)

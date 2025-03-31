@@ -65,7 +65,7 @@ names(processed_data)
 ```{r}
 frequency_data <- (
   processed_data
-  |> dplyr::select(c(1, 5, 59:481))
+  |> dplyr::select(c(1, 5, 59:484))
 )
 frequency_data |> head()
 ```
@@ -84,7 +84,7 @@ unique(frequency_data$fishNum)
 3. We then remove the data columns `F90` to `F170` because they did not record in the original data, where all columns are `NA` values for all ping data and all fish.
 
 ```{r}
-frequency_data <- frequency_data |> dplyr::select(-c(93:253))
+frequency_data <- frequency_data |> dplyr::select(-c(93:256))
 ```
 
 4. Prepare class levels and number of classes in the data for model development use
